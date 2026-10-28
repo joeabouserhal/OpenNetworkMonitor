@@ -1,0 +1,12 @@
+/target/
+/exports/
+*.db
+*.db-shm
+*.db-wal
+*.mmdb
+*.etl
+*.log
+/dist/
+.env
+.env.*
+!.env.example
