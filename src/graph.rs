@@ -128,10 +128,11 @@ impl Graph {
                 continue;
             }
             for run in &runs {
-                let line: Vec<Pos2> = run
+                let samples: Vec<Pos2> = run
                     .iter()
                     .map(|p| Pos2::new(x(p.timestamp), y(if is_down { p.down } else { p.up })))
                     .collect();
+                let line = smooth_line(&samples);
                 if line.len() > 1 {
                     let mut fill = egui::epaint::Mesh::default();
                     for pair in line.windows(2) {
@@ -152,9 +153,9 @@ impl Graph {
                         fill.add_triangle(n, n + 2, n + 3);
                     }
                     lines.add(egui::Shape::mesh(fill));
-                    lines.add(egui::Shape::line(line.clone(), Stroke::new(1.8, color)));
+                    lines.add(egui::Shape::line(line, Stroke::new(1.8, color)));
                 }
-                if let Some(last) = line.last() {
+                if let Some(last) = samples.last() {
                     lines.circle_filled(*last, 2.0, color);
                 }
             }
@@ -199,6 +200,54 @@ impl Graph {
             }
         }
     }
+}
+/// Shape-preserving cubic interpolation in screen space. Every recorded sample
+/// stays on the curve, with no overshoot, extrapolation or averaging of totals.
+/// Called separately for each observed run so downtime remains blank.
+fn smooth_line(points: &[Pos2]) -> Vec<Pos2> {
+    if points.len() < 3 || points.windows(2).any(|p| p[1].x <= p[0].x) {
+        return points.to_vec();
+    }
+    let widths: Vec<_> = points.windows(2).map(|p| p[1].x - p[0].x).collect();
+    let slopes: Vec<_> = points
+        .windows(2)
+        .zip(&widths)
+        .map(|(p, h)| (p[1].y - p[0].y) / h)
+        .collect();
+    let mut tangents = vec![0.0; points.len()];
+    tangents[0] = slopes[0];
+    tangents[points.len() - 1] = slopes[slopes.len() - 1];
+    for i in 1..points.len() - 1 {
+        let (left, right) = (slopes[i - 1], slopes[i]);
+        if left != 0.0 && right != 0.0 && left.signum() == right.signum() {
+            let w1 = 2.0 * widths[i] + widths[i - 1];
+            let w2 = widths[i] + 2.0 * widths[i - 1];
+            tangents[i] = (w1 + w2) / (w1 / left + w2 / right);
+        }
+    }
+    let mut curve = Vec::with_capacity(points.len() * 3);
+    curve.push(points[0]);
+    for (i, pair) in points.windows(2).enumerate() {
+        let h = widths[i];
+        // Keep curved shoulders even for closely spaced samples on long periods.
+        // Bound tessellation so wide segments cannot create unbounded work.
+        let steps = (h / 2.0).ceil().clamp(4.0, 64.0) as usize;
+        for step in 1..steps {
+            let t = step as f32 / steps as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let y = (2.0 * t3 - 3.0 * t2 + 1.0) * pair[0].y
+                + (t3 - 2.0 * t2 + t) * h * tangents[i]
+                + (-2.0 * t3 + 3.0 * t2) * pair[1].y
+                + (t3 - t2) * h * tangents[i + 1];
+            curve.push(Pos2::new(
+                pair[0].x + t * h,
+                y.clamp(pair[0].y.min(pair[1].y), pair[0].y.max(pair[1].y)),
+            ));
+        }
+        curve.push(pair[1]);
+    }
+    curve
 }
 fn observed_runs(points: &[Point], window: (i64, i64)) -> Vec<Vec<&Point>> {
     let mut runs = Vec::new();
@@ -425,6 +474,84 @@ mod tests {
         assert_eq!(observed_runs(&points, (500, 800))[0].len(), 1);
         assert_eq!(observed_runs(&points, (-2800, 800))[0].len(), 2);
         assert!(observed_runs(&points, (900, 1200)).is_empty());
+    }
+    #[test]
+    fn smooth_curves_preserve_samples_and_never_overshoot_spikes_or_plateaus() {
+        let points = [
+            Pos2::new(0.0, 100.0),
+            Pos2::new(20.0, 0.0),
+            Pos2::new(90.0, 70.0),
+            Pos2::new(110.0, 70.0),
+            Pos2::new(140.0, 100.0),
+        ];
+        let curve = smooth_line(&points);
+        assert!(curve.len() > points.len());
+        assert_eq!(curve.first(), points.first());
+        assert_eq!(curve.last(), points.last());
+        assert!(points.iter().all(|p| curve.contains(p)));
+        assert!(curve.windows(2).all(|p| p[0].x < p[1].x));
+        for pair in points.windows(2) {
+            let segment: Vec<_> = curve
+                .iter()
+                .filter(|p| p.x >= pair[0].x && p.x <= pair[1].x)
+                .collect();
+            assert!(
+                segment
+                    .iter()
+                    .all(|p| p.y >= pair[0].y.min(pair[1].y) && p.y <= pair[0].y.max(pair[1].y))
+            );
+            assert!(segment.windows(2).all(|p| if pair[1].y >= pair[0].y {
+                p[1].y >= p[0].y
+            } else {
+                p[1].y <= p[0].y
+            }));
+        }
+        // Curved shoulders replace the straight, pointed joins.
+        assert_ne!(curve.iter().find(|p| p.x == 10.0).unwrap().y, 50.0);
+    }
+    #[test]
+    fn smooth_curves_keep_missing_intervals_and_sparse_data_intact() {
+        let points: Vec<_> = [
+            (10, true, 0),
+            (20, true, 100),
+            (30, true, 0),
+            (40, false, 0),
+            (80, true, 0),
+            (90, true, 100),
+            (100, true, 0),
+        ]
+        .into_iter()
+        .map(|(timestamp, observed, down)| Point {
+            timestamp,
+            observed,
+            down,
+            up: 0,
+        })
+        .collect();
+        let curves: Vec<_> = observed_runs(&points, (0, 120))
+            .iter()
+            .map(|run| {
+                smooth_line(
+                    &run.iter()
+                        .map(|p| Pos2::new(p.timestamp as f32, p.down as f32))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(curves.len(), 2);
+        assert!(curves[0].iter().all(|p| p.x <= 30.0));
+        assert!(curves[1].iter().all(|p| p.x >= 80.0));
+        for sparse in [
+            &[][..],
+            &[Pos2::ZERO][..],
+            &[Pos2::ZERO, Pos2::new(5.0, 10.0)][..],
+        ] {
+            assert_eq!(smooth_line(sparse), sparse);
+        }
+        let dense = [Pos2::ZERO, Pos2::new(0.5, 100.0), Pos2::new(1.0, 0.0)];
+        assert!(smooth_line(&dense).len() > dense.len());
+        let duplicate = [Pos2::ZERO, Pos2::ZERO, Pos2::new(5.0, 10.0)];
+        assert_eq!(smooth_line(&duplicate), duplicate);
     }
     #[test]
     fn destination_shares_handle_large_or_empty_totals() {

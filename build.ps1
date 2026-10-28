@@ -74,8 +74,8 @@ try {
 
     $outputRoot = $targetRoot
     if (-not [string]::IsNullOrEmpty($env:CARGO_BUILD_TARGET)) { $outputRoot = Join-Path $outputRoot $buildTarget }
-    $profile = $Configuration.ToLowerInvariant()
-    $executable = Join-Path (Join-Path $outputRoot $profile) 'OpenNetworkMonitor.exe'
+    $buildProfile = $Configuration.ToLowerInvariant()
+    $executable = Join-Path (Join-Path $outputRoot $buildProfile) 'OpenNetworkMonitor.exe'
     $buildArguments = @('build', '--locked', '--bin', 'OpenNetworkMonitor', '--target-dir', $targetRoot)
     if ($Configuration -eq 'Release') { $buildArguments += '--release' }
 
@@ -87,7 +87,7 @@ try {
     Preserve-LockedExecutable $executable
     # Cargo may hard-link the top-level executable to deps/. Preserve a mapped
     # artifact there too so rebuilding the same version can link successfully.
-    $dependencyOutput = Join-Path (Join-Path $outputRoot $profile) 'deps'
+    $dependencyOutput = Join-Path (Join-Path $outputRoot $buildProfile) 'deps'
     if (Test-Path -LiteralPath $dependencyOutput -PathType Container) {
         foreach ($artifact in Get-ChildItem -LiteralPath $dependencyOutput -Filter 'OpenNetworkMonitor*.exe' -File) {
             Preserve-LockedExecutable $artifact.FullName

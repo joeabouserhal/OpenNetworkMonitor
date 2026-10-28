@@ -1,12 +1,12 @@
 # Validation
 
-The current Windows build passes formatting, strict Clippy, and 48 default automated tests. The optimized MSVC executable embeds `requireAdministrator` with `uiAccess=false`. No driver or Npcap installation is required for the native capture path.
+The current Windows build passes formatting, strict Clippy, and 51 default automated tests. The optimized MSVC executable embeds `requireAdministrator` with `uiAccess=false`. No driver or Npcap installation is required for the native capture path.
 
 ## Reproduce the checks
 
 Run `./build.ps1` on Windows with Rust 1.95+ MSVC and Visual Studio C++ Build Tools. The script checks formatting, runs the default tests, runs strict all-target Clippy with the UI preview enabled, builds the release, and creates a ZIP plus SHA-256 checksum under `dist/`.
 
-The default suite covers source isolation, LAN/WAN classification, adapter selection, minute rollups, saved-history restoration, transactional retries, CSV filters and escaping, app/type aggregation, top-five ranking, window bounds, compact layouts, themes, contrast and dropdown interactions.
+The default suite covers source isolation, LAN/WAN classification, adapter selection, minute rollups, saved-history restoration, transactional retries, CSV filters and escaping, app/type aggregation, top-five ranking parity with App traffic (including loopback and unattributed bytes), smooth curves without overshoot or gap bridging, window bounds, compact layouts, themes, contrast and dropdown interactions.
 
 Three live-machine probes are ignored by default. Run them explicitly with `cargo test --locked -- --ignored --nocapture` when appropriate. They read Windows adapter/process metadata, exercise worker shutdown/reopen with a temporary database, and query the configured DNS resolver. The generated-traffic capture test is separate: in an elevated terminal, run `cargo run -- --self-test-capture`. It checks attribution, ports, timestamps, exact TCP/UDP payload counts and event losses over IPv4 and IPv6. Diagnostic reports can contain local addresses; keep them local.
 

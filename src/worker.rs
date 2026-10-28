@@ -150,7 +150,10 @@ fn read_histories(
                 scope: Scope::All,
                 search: String::new(),
                 apps: HashSet::new(),
-                ..effective
+                // An empty selection means all captured app traffic, just as on
+                // App traffic. Expanding it to visible counter adapters drops
+                // loopback and unattributed transfers (for example Steam LAN).
+                ..filter.clone()
             },
             now,
         )?
@@ -551,6 +554,137 @@ mod tests {
         assert_eq!(history.down, 42);
         Ok(())
     }
+    #[test]
+    fn overall_top_apps_match_app_traffic_including_loopback_and_unattributed_bytes() -> Result<()>
+    {
+        let mut store = Store::open(std::path::Path::new(":memory:"))?;
+        let base = UsageRow {
+            source: "transport".into(),
+            adapter_id: "visible".into(),
+            scope: "WAN".into(),
+            ..Default::default()
+        };
+        let mut rows: Vec<_> = (0..6)
+            .map(|i| UsageRow {
+                app: format!("browser{i}.exe"),
+                down: (i + 1) * 1000,
+                ..base.clone()
+            })
+            .collect();
+        rows.extend([
+            UsageRow {
+                app: "steam.exe".into(),
+                adapter_id: "loopback".into(),
+                scope: "LAN".into(),
+                down: 7 * 1024 * 1024 * 1024,
+                ..base.clone()
+            },
+            UsageRow {
+                app: "steam.exe".into(),
+                pid: 42,
+                down: 10,
+                up: 5,
+                ..base.clone()
+            },
+            UsageRow {
+                app: "unattributed.exe".into(),
+                adapter_id: String::new(),
+                down: 2 * 1024 * 1024 * 1024,
+                ..base.clone()
+            },
+            UsageRow {
+                source: "adapter".into(),
+                adapter_id: "visible".into(),
+                down: 42,
+                ..Default::default()
+            },
+            UsageRow {
+                source: "adapter".into(),
+                adapter_id: "loopback".into(),
+                down: 999,
+                ..Default::default()
+            },
+        ]);
+        store.write(600, &rows)?;
+        store.write(
+            300,
+            &[UsageRow {
+                app: "old.exe".into(),
+                down: u64::MAX / 2,
+                ..base
+            }],
+        )?;
+        let known = HashSet::from(["visible".into()]);
+        for adapters in [
+            HashSet::new(),
+            HashSet::from(["visible".into()]),
+            HashSet::from(["visible".into(), "loopback".into()]),
+            HashSet::from(["missing".into()]),
+        ] {
+            let filter = Filter {
+                seconds: 300,
+                adapters,
+                ..Default::default()
+            };
+            let (history, summary) = read_histories(&store, &filter, &known, 900)?;
+            assert_eq!(
+                history.down,
+                if filter.adapters.contains("missing") {
+                    0
+                } else {
+                    42
+                }
+            );
+            let apps = store.history(
+                &Filter {
+                    source: Source::Transport,
+                    ..filter.clone()
+                },
+                900,
+            )?;
+            let mut expected = std::collections::BTreeMap::<String, crate::model::AppUsage>::new();
+            for row in apps.rows {
+                let app =
+                    expected
+                        .entry(row.app.clone())
+                        .or_insert_with(|| crate::model::AppUsage {
+                            app: row.app,
+                            ..Default::default()
+                        });
+                app.down += row.down;
+                app.up += row.up;
+            }
+            let mut expected: Vec<_> = expected.into_values().collect();
+            expected.sort_by(|a, b| {
+                (b.down + b.up)
+                    .cmp(&(a.down + a.up))
+                    .then(a.app.cmp(&b.app))
+            });
+            expected.truncate(5);
+            assert_eq!(
+                summary.top_apps, expected,
+                "selection: {:?}",
+                filter.adapters
+            );
+            assert_eq!(
+                summary.classified.lan + summary.classified.wan,
+                apps.down + apps.up
+            );
+            if filter.adapters.is_empty() {
+                assert_eq!(summary.top_apps[0].app, "steam.exe");
+                assert_eq!(summary.top_apps[0].down, 7 * 1024 * 1024 * 1024 + 10);
+                // No known counter adapters must not hide saved app transfers either.
+                assert_eq!(
+                    read_histories(&store, &filter, &HashSet::new(), 900)?
+                        .1
+                        .top_apps,
+                    summary.top_apps
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn live_points_follow_selected_adapter_and_actual_interval() {
         let sample = LiveTick {

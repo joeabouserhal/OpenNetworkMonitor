@@ -255,6 +255,12 @@ mod render_tests {
             ("adapter-small", "overview", false, [960.0, 680.0]),
             ("overall-other", "overview", false, [960.0, 680.0]),
             (
+                "overall-smooth",
+                "overview",
+                false,
+                widgets::DEFAULT_WINDOW_SIZE,
+            ),
+            (
                 "overall-wide",
                 "overview",
                 false,
@@ -267,6 +273,11 @@ mod render_tests {
         ] {
             let ctx = egui::Context::default();
             let mut app = MonitorApp::preview(&ctx, page, light);
+            if name == "overall-smooth" {
+                app.settings.filter.seconds = 300;
+                let history = Arc::make_mut(&mut app.data.history);
+                history.window_start = history.window_end - 300;
+            }
             if name == "overall-other" {
                 let other = app.data.classified.wan / 10;
                 app.data.classified.wan -= other;

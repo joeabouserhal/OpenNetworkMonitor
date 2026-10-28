@@ -747,7 +747,6 @@ impl MonitorApp {
         totals.sort_by(|a, b| {
             (b.down.saturating_add(b.up))
                 .cmp(&a.down.saturating_add(a.up))
-                .then(a.name.cmp(&b.name))
                 .then(a.path.cmp(&b.path))
         });
         self.app_cache = Arc::new(totals);
@@ -1313,7 +1312,7 @@ impl MonitorApp {
         });
         ui.add_space(6.0);
         ui.label(
-            RichText::new("OpenNetworkMonitor 0.3.3 · MIT · Rust + egui")
+            RichText::new("OpenNetworkMonitor 0.3.4 · MIT · Rust + egui")
                 .size(13.0)
                 .weak(),
         );
