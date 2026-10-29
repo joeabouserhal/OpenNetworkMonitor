@@ -4,6 +4,7 @@ pub mod graph;
 pub mod hosts;
 pub mod icons;
 pub mod model;
+pub mod startup;
 pub mod store;
 pub mod traffic;
 pub mod tray;

@@ -1,5 +1,5 @@
 use crate::model::{Adapter, Connection, ipv4_from_windows};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
@@ -131,6 +131,10 @@ pub struct InstanceGuard {
 }
 impl InstanceGuard {
     pub fn acquire() -> Result<Self> {
+        Self::try_acquire()?
+            .context("OpenNetworkMonitor is already running. Open it from its system tray icon.")
+    }
+    pub fn try_acquire() -> Result<Option<Self>> {
         let name: Vec<u16> = "Local\\OpenNetworkMonitor.Collector.v1\0"
             .encode_utf16()
             .collect();
@@ -142,9 +146,9 @@ impl InstanceGuard {
         let guard = OwnedHandle(handle);
         // SAFETY: GetLastError reads the last API result for this thread.
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            bail!("OpenNetworkMonitor is already running. Open it from its system tray icon.");
+            return Ok(None);
         }
-        Ok(Self { _handle: guard })
+        Ok(Some(Self { _handle: guard }))
     }
 }
 pub fn process_names() -> Result<HashMap<u32, String>> {

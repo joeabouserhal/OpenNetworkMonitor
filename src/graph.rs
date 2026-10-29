@@ -96,6 +96,8 @@ impl Graph {
                     d.with_timezone(&chrono::Local)
                         .format(if short {
                             "%H:%M:%S"
+                        } else if end - start >= 90 * 86400 {
+                            "%d %b %Y"
                         } else if end - start > 86400 {
                             "%d %b %H:%M"
                         } else {
@@ -187,7 +189,7 @@ impl Graph {
                     if let Some(date) = chrono::DateTime::from_timestamp(point.timestamp, 0) {
                         ui.strong(
                             date.with_timezone(&chrono::Local)
-                                .format("%d %b · %H:%M:%S")
+                                .format("%d %b %Y · %H:%M:%S")
                                 .to_string(),
                         );
                     }

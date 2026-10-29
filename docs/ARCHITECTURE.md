@@ -95,3 +95,17 @@ The Overview subtitle and standing selection hint are removed. Clear selection m
 Windows connection profiles provide the current Wi-Fi SSID and adapter GUID on the collector thread. SSIDs use stable IDs derived from their exact UTF-16 values; displayed labels remove control characters. Schema version 5 atomically adds the Wi-Fi ID to both traffic and adapter-sample keys and stores a local name catalog. Existing rows keep an empty ID because their network cannot be reconstructed. The UI intersects the selected Wi-Fi connection with the existing adapter and period filters.
 
 The collector observes each connection about once a second. Adapter deltas spanning an observed switch are marked unidentified. Because ETW timestamps have one-second precision, a bounded queue waits for a later observation before attributing Wi-Fi events to a confirmed stable interval; unresolved events are retained as unidentified on timeout, queue pressure, or exit. Delayed events can use recently confirmed intervals, and association still requires a unique local-address match to an adapter. Switches entirely between observations cannot be detected.
+
+## Extended periods and indefinite history
+
+The shared period selector supports 5/15/30 minutes, 1/3/6/12/24 hours, 3/7/30/90 days, one year, and All time. Custom periods can be rolling durations in minutes/hours/days/weeks or fixed local date/time ranges. Fixed ranges are stored as UTC timestamps in Filter.time_range; seconds=0 with no fixed range means all saved history. The complete ending minute is included. History, chart domains, summaries and exports share these bounds. All-time chart bounds start at the earliest saved record for the source.
+
+Minute usage records no longer expire. Hourly maintenance removes only raw adapter samples older than 24 hours; minute records continue to supply older charts. Views longer than one day refresh every five seconds to reduce repeated work on larger histories. Existing user preferences without a fixed range keep their rolling period.
+
+## Custom period dialog and startup settings
+
+The custom period editor uses a centered egui modal with shared palette styling, paired date/time fields, local-time parsing and month calendar popovers. Drafts remain separate from the active filter until Apply. Calendar selection preserves the time field.
+
+startup.rs manages an optional, SID-scoped Windows logon task through Task Scheduler COM. It verifies an app ownership marker before updating or removing a task, escapes executable paths in XML, and uses interactive-token/highest-available execution. A background controller keeps scheduler calls off the UI thread and reports the actual registered state instead of persisting a separate checkbox. Preview/test controllers never contact Windows. The --startup argument requests a hidden tray launch, falls back to a visible window if the tray fails, and quietly exits if an instance already holds the app lock.
+
+The period dropdown uses compact 20-point buttons with 2-point gaps. The month-to-date option is a dynamic calendar period (seconds=-1), resolved against the current local month for every query and export. Midnight offset changes use the earliest valid local instant. It persists across restarts and advances at the next month boundary. The rolling editor omits a fixed end-time row, and validation shares the helper-text area so the compact modal stays the same size.

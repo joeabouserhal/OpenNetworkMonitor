@@ -23,6 +23,7 @@ impl MonitorApp {
         let mut app = Self {
             worker: Worker::for_ui_test(),
             icons: IconCache::disabled(),
+            startup: crate::startup::Controller::preview(),
             tray: None,
             data: Shared::default(),
             settings,
@@ -45,6 +46,7 @@ impl MonitorApp {
             data_dir: PathBuf::from(r"C:\Users\Example\AppData\Local\OpenNetworkMonitor"),
             view_warning: String::new(),
             show_graph_options: false,
+            custom_period: None,
             app_cache: Arc::default(),
             app_cache_key: None,
             breakdown_cache: Arc::default(),
@@ -260,9 +262,14 @@ impl MonitorApp {
                 .saturating_sub(68_000_000),
             unknown: 0,
         };
+        let (start, end) = if self.settings.filter.all_time() {
+            (now - 3600, now)
+        } else {
+            self.settings.filter.time_bounds(now)
+        };
         self.data.history = Arc::new(History {
-            window_start: now - self.settings.filter.seconds,
-            window_end: now,
+            window_start: start,
+            window_end: end,
             down: rows.iter().map(|r| r.down).sum(),
             up: rows.iter().map(|r| r.up).sum(),
             rows,
@@ -304,9 +311,28 @@ mod render_tests {
             ("adapters", "adapters", false, [960.0, 680.0]),
             ("settings", "settings", false, [1200.0, 820.0]),
             ("apps-light", "apps", true, [1200.0, 820.0]),
+            ("period-dates", "overview", false, [960.0, 680.0]),
+            ("period-dates-light", "overview", true, [960.0, 680.0]),
+            ("period-rolling", "overview", false, [960.0, 680.0]),
+            ("period-rolling-light", "overview", true, [960.0, 680.0]),
         ] {
             let ctx = egui::Context::default();
             let mut app = MonitorApp::preview(&ctx, page, light);
+            if name.starts_with("period-") {
+                let filter = Filter {
+                    seconds: 86400,
+                    time_range: if name.starts_with("period-dates") {
+                        Some(TimeRange {
+                            start: 1782864000,
+                            end: 1782950399,
+                        })
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                };
+                app.custom_period = Some(CustomPeriod::from_filter(&filter));
+            }
             if name == "overall-smooth" {
                 app.settings.filter.seconds = 300;
                 let history = Arc::make_mut(&mut app.data.history);

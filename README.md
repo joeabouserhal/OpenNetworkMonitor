@@ -25,7 +25,7 @@ cargo build --locked --release
 .\target\release\OpenNetworkMonitor.exe
 ```
 
-The executable now embeds an administrator requirement. Opening it requests Windows approval automatically, so detailed per-application monitoring starts with the required access. Build normally, then open the executable through Explorer; use an elevated terminal for `cargo run` or command-line diagnostics. The app does not install a driver, service, firewall rule, scheduled task, or startup entry.
+The executable now embeds an administrator requirement. Opening it requests Windows approval automatically, so detailed per-application monitoring starts with the required access. Build normally, then open the executable through Explorer; use an elevated terminal for `cargo run` or command-line diagnostics. The app does not install a driver, service, or firewall rule. Optional launch at sign-in can be enabled in Settings → Background monitoring. It uses a per-user Windows scheduled task so the app can start with the administrator access required for monitoring.
 
 Closing the window hides it to the system tray by default. Left-click the tray icon to reopen it; right-click → **Exit** hides the window immediately and stops the app after saving its final data. If creating the tray fails, closing the window exits instead. The process must remain running to record traffic.
 
@@ -53,8 +53,9 @@ These previews use generated sample data.
 - A neutral **Slate** default with brighter text and Segoe UI typography, plus Light, Nord and Catppuccin Mocha palettes.
 - Four sidebar destinations: Overview, Connections, Adapters and Settings. App traffic lives in Overview. Shared panel spacing, aligned headers, readable usage totals, labeled Down/Up values and a persistent monitoring status keep navigation consistent.
 - A fitted Connections table with PID/folder subtitles, bounded address columns and full-value tooltips. Adapter actions align across rows and open the selected adapter directly in Overview. Settings are grouped into sections, with detailed measurement notes collapsed by default.
-- SQLite minute-level history with thirty-day retention, stored in `%LOCALAPPDATA%\OpenNetworkMonitor\usage.db`.
+- SQLite minute-level history kept indefinitely, stored in `%LOCALAPPDATA%\OpenNetworkMonitor\usage.db`.
 - CSV export of the current usage filters (including the app search or selected app), with UTC timestamps, raw byte counts and traffic types. Existing export files are not overwritten.
+- Optional **Launch when I sign in to Windows** in Settings → Background monitoring. It starts this copy in the system tray, uses the current user's elevated interactive session, and can be turned off from the same setting.
 - Persisted theme, filters, units, country-database path, window state and close-to-tray preference.
 - Single-instance lock, visible capture errors and loss counters, bounded event queue and country cache, storage retries, background worker independent from rendering.
 
@@ -78,7 +79,7 @@ Socket tables expose TCP remote endpoints but not UDP destinations. Observed UDP
 
 Host names use reverse DNS through your configured Windows resolver, on two background threads with bounded queues and caching. Requests occur for the displayed host list. Shared hosting/CDN names can differ from the website visited; IPs remain in subtitles or tooltips. Host-name resolution can generate ordinary DNS traffic. It does not contact a separate IP lookup service. Traffic-type labels are port-based estimates, so encrypted DNS carried on HTTPS ports appears as HTTPS/TLS. Existing history without recorded ports remains **Unclassified**, retaining its original byte counts.
 
-History is stored in UTC minute buckets. The chart follows the selected 5m/1h/24h/7d/30d period and refreshes every second. Recent adapter samples are stored for 24 hours and survive reopening; older history uses minute aggregates. Long ranges are downsampled for display. Missing samples produce gaps rather than invented zero traffic or lines across downtime. Period selection rounds down to a minute. Empty time spans stay empty on the graph. Measured zero traffic is still shown as zero. Freeze pauses the chart only; recording, range totals and live speed continue. Country lookup applies to newly captured traffic and is approximate.
+History is stored in UTC minute buckets with no automatic expiry. Histories already deleted by older versions cannot be recovered. The chart follows the selected period, including 15m/30m, longer presets, Since beginning of month, All time, and custom rolling durations or date ranges. Month-to-date begins at local midnight on the first day and updates automatically when the month changes. The custom dialog has separate date/time fields and calendar popovers. Date ranges use local time and include the full ending minute; CSV timestamps remain UTC. Views up to 24 hours refresh every second; longer and all-time views refresh every five seconds. Recent adapter samples are stored for 24 hours and survive reopening; older history uses minute aggregates. Long ranges are downsampled for display. Missing samples produce gaps rather than invented zero traffic or lines across downtime. Period selection rounds down to a minute. Empty time spans stay empty on the graph. Measured zero traffic is still shown as zero. Freeze pauses the chart only; recording, range totals and live speed continue. Country lookup applies to newly captured traffic and is approximate.
 
 ## Diagnostics and verification
 

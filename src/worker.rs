@@ -731,13 +731,14 @@ fn run(
                 s.revision += 1;
             }
             if last_prune.elapsed() >= Duration::from_secs(3600) {
-                if let Err(e) = store.prune(now - 30 * 86400) {
+                if let Err(e) = store.prune_samples(now - 86400) {
                     notice(&shared, format!("History cleanup failed: {e}"));
                 }
                 last_prune = Instant::now();
             }
         }
-        let refresh_interval = if filter.source == Source::Adapter || filter.seconds <= 86400 {
+        let (start, end) = filter.time_bounds(chrono::Utc::now().timestamp());
+        let refresh_interval = if !filter.all_time() && end.saturating_sub(start) <= 86400 {
             Duration::from_secs(1)
         } else {
             Duration::from_secs(5)

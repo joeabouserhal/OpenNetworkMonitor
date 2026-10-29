@@ -27,3 +27,13 @@ Sources: [Microsoft MANIFEST](https://learn.microsoft.com/en-us/cpp/build/refere
 The source manifest passes Windows SDK `mt.exe -validate_manifest`. A standalone Rust/MSVC smoke executable was linked using the same three linker options and inspected without launching it: its embedded RT_MANIFEST ID 1 contained exactly one `requestedExecutionLevel`, with `level="requireAdministrator"` and `uiAccess="false"`, and no `asInvoker` fragment. Generated smoke files stay in the ignored `target/` directory.
 
 The final `target/release/OpenNetworkMonitor.exe` version 0.2.0 was also inspected directly on 2026-10-28 with the Windows SDK manifest tool. Its embedded RT_MANIFEST resource ID 1 has assembly version `0.2.0.0`, exactly one `requestedExecutionLevel` set to `requireAdministrator` with `uiAccess="false"`, and no conflicting `asInvoker` fragment. The extracted verification copy is `target/release/embedded-app.manifest`. Verification did not launch the executable or interact with Windows approval prompts.
+
+## Optional launch at sign-in
+
+Settings → Background monitoring → Launch when I sign in to Windows is off by default. Enabling it registers one logon task for the current Windows user, using an interactive token and HighestAvailable run level. The app must already be elevated to configure this task. No password is stored. It runs this executable with --startup, starts hidden in the tray, and keeps monitoring on battery without a task execution time limit. If the tray is unavailable, the window opens so the app stays accessible. An existing instance makes a startup launch exit quietly.
+
+The toggle reads actual Task Scheduler state on a background thread. Disabling it removes only the app-owned task for the current user. If the executable has moved, Use this copy updates its path; keep the app in a stable location. Merely installing or opening the new build does not enable startup.
+
+The native validation probe reads startup state and validates the task XML in memory without registering or running a task. Actual sign-in launch still requires an enabled setting and a real sign-in cycle.
+
+See [Microsoft: task security contexts](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks) and [logon triggers](https://learn.microsoft.com/en-us/windows/win32/taskschd/starting-an-executable-when-a-user-logs-on).

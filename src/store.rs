@@ -143,14 +143,25 @@ impl Store {
         Ok(())
     }
     pub fn history(&self, filter: &Filter, now: i64) -> Result<History> {
-        // Filter at the minute boundary consistently with the stored precision.
-        let start = (now - filter.seconds) / 60 * 60;
+        let (mut window_start, window_end) = filter.time_bounds(now);
+        if filter.all_time() {
+            window_start = self
+                .db
+                .query_row(
+                    "SELECT MIN(minute) FROM traffic WHERE source=?1 AND minute<=?2",
+                    params![filter.source.key(), window_end],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?
+                .unwrap_or(window_end.saturating_sub(3600));
+        }
+        // Totals use complete minute buckets, consistently across every view.
+        let start = window_start / 60 * 60;
         let mut stmt = self.db.prepare_cached("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,SUM(down),SUM(up),traffic_type,wifi_network
             FROM traffic WHERE source=?1 AND minute>=?2 AND minute<=?3
             GROUP BY minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network ORDER BY minute")?;
         let mut result = History {
-            window_start: now - filter.seconds,
-            window_end: now,
+            window_start,
+            window_end,
             ..Default::default()
         };
         let mut points = std::collections::BTreeMap::<i64, (u64, u64)>::new();
@@ -158,7 +169,7 @@ impl Store {
             (String, String, u32, String, String, String, String, String),
             UsageRow,
         >::new();
-        let iter = stmt.query_map(params![filter.source.key(), start, now], |r| {
+        let iter = stmt.query_map(params![filter.source.key(), start, window_end], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 UsageRow {
@@ -215,7 +226,7 @@ impl Store {
             // adapters in the same second must not be counted twice.
             let mut by_adapter =
                 std::collections::BTreeMap::<(i64, String), (u64, u64, f64)>::new();
-            for row in raw.query_map(params![now - filter.seconds, now], |r| {
+            for row in raw.query_map(params![window_start, window_end], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -258,7 +269,7 @@ impl Store {
                 series.push((minute, down, up, 60.0, 60));
             }
         }
-        result.points = plot_series(series, now - filter.seconds, now);
+        result.points = plot_series(series, window_start, window_end);
         result.rows = totals.into_values().collect();
         result
             .rows
@@ -266,7 +277,8 @@ impl Store {
         Ok(result)
     }
     pub fn export(&self, path: &Path, filter: &Filter, now: i64) -> Result<usize> {
-        let start = (now - filter.seconds) / 60 * 60;
+        let (start, end) = filter.time_bounds(now);
+        let start = start / 60 * 60;
         let mut stmt = self.db.prepare("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network FROM traffic WHERE source=?1 AND minute>=?2 AND minute<=?3 ORDER BY minute")?;
         // create_new prevents accidental overwrite or a partial replacement of an existing export.
         let file = std::fs::OpenOptions::new()
@@ -297,7 +309,7 @@ impl Store {
             .map(|n| (n.id, n.name))
             .collect();
         let mut count = 0;
-        let rows = stmt.query_map(params![filter.source.key(), start, now], |r| {
+        let rows = stmt.query_map(params![filter.source.key(), start, end], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 UsageRow {
@@ -408,7 +420,8 @@ impl Store {
     /// Shared period/adapter rollup for the Overall Traffic footer, independent of app-page search.
     pub fn transport_summary(&self, filter: &Filter, now: i64) -> Result<TransportSummary> {
         let mut stmt=self.db.prepare_cached("SELECT adapter_id,app,scope,SUM(down),SUM(up),wifi_network FROM traffic WHERE source='transport' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id,app,scope,wifi_network")?;
-        let rows = stmt.query_map(params![(now - filter.seconds) / 60 * 60, now], |r| {
+        let (start, end) = filter.time_bounds(now);
+        let rows = stmt.query_map(params![start / 60 * 60, end], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -458,13 +471,10 @@ impl Store {
             top_apps,
         })
     }
-    pub fn prune(&self, before: i64) -> Result<()> {
+    /// Compact recent chart samples only. Minute usage history has no expiry.
+    pub fn prune_samples(&self, before: i64) -> Result<()> {
         self.db
-            .execute("DELETE FROM traffic WHERE minute<?1", [before])?;
-        self.db.execute(
-            "DELETE FROM adapter_samples WHERE timestamp<?1",
-            [before + 29 * 86400],
-        )?;
+            .execute("DELETE FROM adapter_samples WHERE timestamp<?1", [before])?;
         Ok(())
     }
 }
@@ -577,7 +587,7 @@ mod tests {
         assert!(result.points.iter().all(|p| p.timestamp != 240));
         filter.adapters.insert("other".into());
         assert_eq!(store.history(&filter, 300)?.down, 0);
-        store.prune(180)?;
+        store.prune_samples(180)?;
         assert_eq!(
             store
                 .history(
@@ -588,7 +598,7 @@ mod tests {
                     300
                 )?
                 .down,
-            0
+            240
         );
         Ok(())
     }
@@ -1312,6 +1322,158 @@ mod top_app_tests {
                 )?
                 .top_apps
                 .is_empty()
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unlimited_history_tests {
+    use super::*;
+    use crate::model::{Source, TimeRange};
+    #[test]
+    fn old_history_survives_cleanup_and_date_ranges_match_chart_summary_and_export() -> Result<()> {
+        use std::collections::{BTreeMap, HashMap};
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history.db");
+        let now = 60 * 86400;
+        let old = 600;
+        let recent = now - 600;
+        {
+            let mut store = Store::open(&path)?;
+            for (time, down) in [(old, 100), (recent, 200)] {
+                let adapter = UsageRow {
+                    source: "adapter".into(),
+                    adapter_id: "wifi".into(),
+                    wifi_network: "home".into(),
+                    down,
+                    up: down / 10,
+                    ..Default::default()
+                };
+                let app = UsageRow {
+                    source: "transport".into(),
+                    app: "browser.exe".into(),
+                    scope: "WAN".into(),
+                    ..adapter.clone()
+                };
+                store.write_capture(
+                    &BTreeMap::from([(time, vec![adapter, app])]),
+                    &[LiveTick {
+                        timestamp: time,
+                        interval: 1.0,
+                        adapters: HashMap::from([("wifi".into(), (down, down / 10))]),
+                        wifi_networks: HashMap::from([("wifi".into(), "home".into())]),
+                    }],
+                )?;
+            }
+            store.prune_samples(now - 86400)?;
+        }
+        let store = Store::open(&path)?;
+        let all = Filter {
+            seconds: 0,
+            wifi_network: Some("home".into()),
+            ..Default::default()
+        };
+        let history = store.history(&all, now)?;
+        assert_eq!((history.down, history.up), (300, 30));
+        assert_eq!((history.window_start, history.window_end), (old, now));
+        assert!(
+            history
+                .points
+                .iter()
+                .any(|p| p.observed && p.timestamp == old)
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT COUNT(*) FROM adapter_samples", [], |r| r
+                    .get::<_, i64>(0))?,
+            1
+        );
+        let custom = Filter {
+            seconds: 60,
+            time_range: Some(TimeRange {
+                start: old,
+                end: old + 59,
+            }),
+            ..all.clone()
+        };
+        let history = store.history(&custom, now)?;
+        assert_eq!((history.down, history.up), (100, 10));
+        assert_eq!((history.window_start, history.window_end), (old, old + 59));
+        assert!(history.points.iter().all(|p| p.timestamp <= old + 59));
+        assert_eq!(store.transport_summary(&custom, now)?.top_apps[0].down, 100);
+        let csv = dir.path().join("custom.csv");
+        assert_eq!(store.export(&csv, &custom, now)?, 1);
+        assert_eq!(
+            csv::Reader::from_path(csv)?
+                .records()
+                .next()
+                .unwrap()?
+                .get(10),
+            Some("100")
+        );
+        let long = Filter {
+            source: Source::Transport,
+            seconds: 90 * 86400,
+            ..all
+        };
+        assert_eq!(store.history(&long, now)?.down, 300);
+        let json = serde_json::to_string(&custom)?;
+        let restored: Filter = serde_json::from_str(&json)?;
+        assert_eq!(restored.time_range, custom.time_range);
+        assert_eq!(store.history(&restored, now)?.down, 100);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod month_to_date_tests {
+    use super::*;
+    use crate::model::{PERIOD_MONTH_TO_DATE, Source};
+    use chrono::TimeZone;
+    #[test]
+    fn month_to_date_filters_history_summary_and_csv_consistently() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 10, 29, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let filter = Filter {
+            seconds: PERIOD_MONTH_TO_DATE,
+            ..Default::default()
+        };
+        let (start, _) = filter.time_bounds(now);
+        for (timestamp, down) in [(start - 60, 100), (start, 200), (now, 300), (now + 60, 999)] {
+            let row = UsageRow {
+                source: "adapter".into(),
+                adapter_id: "wifi".into(),
+                down,
+                up: down / 10,
+                ..Default::default()
+            };
+            let app = UsageRow {
+                source: "transport".into(),
+                app: "browser.exe".into(),
+                scope: "WAN".into(),
+                ..row.clone()
+            };
+            store.write(timestamp, &[row, app])?;
+        }
+        let history = store.history(&filter, now)?;
+        assert_eq!((history.down, history.up), (500, 50));
+        assert_eq!((history.window_start, history.window_end), (start, now));
+        assert_eq!(store.transport_summary(&filter, now)?.top_apps[0].down, 500);
+        let app_filter = Filter {
+            source: Source::Transport,
+            ..filter
+        };
+        assert_eq!(store.history(&app_filter, now)?.down, 500);
+        let directory = tempfile::tempdir()?;
+        assert_eq!(
+            store.export(&directory.path().join("month.csv"), &app_filter, now)?,
+            2
         );
         Ok(())
     }

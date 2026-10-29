@@ -18,6 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod period;
+use period::{CustomPeriod, PERIODS, period_caption};
+
 #[cfg(feature = "ui-preview")]
 mod preview;
 
@@ -200,6 +203,7 @@ struct FrozenChart {
 pub struct MonitorApp {
     worker: Worker,
     icons: IconCache,
+    startup: crate::startup::Controller,
     tray: Option<Tray>,
     data: Shared,
     settings: Settings,
@@ -217,6 +221,7 @@ pub struct MonitorApp {
     data_dir: PathBuf,
     view_warning: String,
     show_graph_options: bool,
+    custom_period: Option<CustomPeriod>,
     app_cache: Arc<Vec<AppTotal>>,
     app_cache_key: Option<(u64, u64, u64, String)>,
     breakdown_cache: Arc<Breakdown>,
@@ -249,9 +254,14 @@ impl MonitorApp {
                 format!("Tray unavailable: {e}. Closing the window will exit."),
             ),
         };
+        if std::env::args().any(|arg| arg == "--startup") {
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::Visible(tray.is_none()));
+        }
         Ok(Self {
             worker,
             icons: IconCache::new(),
+            startup: crate::startup::Controller::new(cc.egui_ctx.clone()),
             tray,
             data: Shared::default(),
             settings,
@@ -269,6 +279,7 @@ impl MonitorApp {
             data_dir,
             view_warning,
             show_graph_options: false,
+            custom_period: None,
             app_cache: Arc::new(Vec::new()),
             app_cache_key: None,
             breakdown_cache: Arc::default(),
@@ -440,7 +451,11 @@ impl MonitorApp {
         }
     }
     fn toolbar(&mut self, ui: &mut egui::Ui, apps: bool) {
-        let before = (self.settings.filter.seconds, self.settings.filter.scope);
+        let before = (
+            self.settings.filter.seconds,
+            self.settings.filter.time_range,
+            self.settings.filter.scope,
+        );
         let mut adapters_changed = false;
         surface(ui).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -458,10 +473,7 @@ impl MonitorApp {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     let widths = [126.0, 148.0, 144.0];
-                    let label = PERIODS
-                        .iter()
-                        .find(|(seconds, _)| *seconds == self.settings.filter.seconds)
-                        .map_or("Custom", |(_, label)| *label);
+                    let label = period_caption(&self.settings.filter);
                     filter_dropdown(
                         ui,
                         if apps { "app-period" } else { "overall-period" },
@@ -469,18 +481,37 @@ impl MonitorApp {
                         format!("Period: {label}"),
                         false,
                         |ui| {
-                            for (seconds, label) in [
-                                (300, "5 minutes"),
-                                (3600, "1 hour"),
-                                (86400, "24 hours"),
-                                (604800, "7 days"),
-                                (2592000, "30 days"),
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.settings.filter.seconds,
-                                    seconds,
-                                    label,
-                                );
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.spacing_mut().button_padding.y = 2.0;
+                            ui.spacing_mut().interact_size.y = 22.0;
+                            if period::choice(
+                                ui,
+                                self.settings.filter.month_to_date(),
+                                "Since beginning of month",
+                            )
+                            .clicked()
+                            {
+                                self.settings.filter.seconds = PERIOD_MONTH_TO_DATE;
+                                self.settings.filter.time_range = None;
+                            }
+                            if period::choice(ui, self.settings.filter.all_time(), "All time")
+                                .clicked()
+                            {
+                                self.settings.filter.seconds = 0;
+                                self.settings.filter.time_range = None;
+                            }
+                            if period::choice(ui, label == "Custom", "Custom…").clicked() {
+                                self.custom_period =
+                                    Some(CustomPeriod::from_filter(&self.settings.filter));
+                            }
+                            ui.separator();
+                            for &(seconds, _, label) in PERIODS.iter().filter(|p| p.0 > 0) {
+                                let selected = self.settings.filter.time_range.is_none()
+                                    && self.settings.filter.seconds == seconds;
+                                if period::choice(ui, selected, label).clicked() {
+                                    self.settings.filter.seconds = seconds;
+                                    self.settings.filter.time_range = None;
+                                }
                             }
                         },
                     );
@@ -539,10 +570,17 @@ impl MonitorApp {
                 },
             );
         });
-        if adapters_changed || before != (self.settings.filter.seconds, self.settings.filter.scope)
+        if adapters_changed
+            || before
+                != (
+                    self.settings.filter.seconds,
+                    self.settings.filter.time_range,
+                    self.settings.filter.scope,
+                )
         {
             self.update_filter();
         }
+        self.custom_period_dialog(ui.ctx());
         ui.add_space(4.0);
     }
     fn export(&mut self) {
@@ -715,7 +753,7 @@ impl MonitorApp {
             return (h.window_start, h.window_end);
         }
         let now = chrono::Utc::now().timestamp();
-        (now - self.settings.filter.seconds, now)
+        self.settings.filter.time_bounds(now)
     }
     fn live_rates(&self, source: Source) -> (f64, f64) {
         let mut f = self.settings.filter.clone();
@@ -1255,6 +1293,45 @@ impl MonitorApp {
                 "Background monitoring",
                 "Keep collecting when the window is closed.",
             );
+            self.startup.poll();
+            let mut enabled = self.startup.enabled;
+            let startup_toggle = ui.add_enabled(
+                self.startup.available && !self.startup.busy,
+                egui::Checkbox::new(&mut enabled, "Launch when I sign in to Windows"),
+            );
+            if startup_toggle.changed() {
+                self.startup.set_enabled(enabled);
+            }
+            ui.label(
+                RichText::new("Starts in the tray and monitors in the background.")
+                    .size(13.5)
+                    .weak(),
+            );
+            if self.startup.busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Updating startup settings…");
+                });
+            }
+            if self.startup.enabled && self.startup.different_copy {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Startup points to another copy of the app.")
+                            .size(13.0)
+                            .weak(),
+                    );
+                    if ui
+                        .add_enabled(!self.startup.busy, egui::Button::new("Use this copy"))
+                        .clicked()
+                    {
+                        self.startup.set_enabled(true);
+                    }
+                });
+            }
+            if !self.startup.error.is_empty() {
+                widgets::message(ui, &self.startup.error, true, false);
+            }
+            ui.separator();
             ui.add_enabled(
                 self.tray.is_some(),
                 egui::Checkbox::new(
@@ -1356,7 +1433,7 @@ impl MonitorApp {
             section_title(
                 ui,
                 "History & exports",
-                "30 days of local history. CSV follows the current Overview filters.",
+                "Usage history is kept indefinitely. CSV follows the current Overview filters.",
             );
             ui.add(
                 egui::Label::new(
@@ -1477,7 +1554,7 @@ impl MonitorApp {
                     ui.add_space(3.0);
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.label(RichText::new("History kept for 30 days").size(12.5).weak());
+                    ui.label(RichText::new("History kept indefinitely").size(12.5).weak());
                     ui.label(
                         RichText::new(format!(
                             "{} connections",
@@ -1671,13 +1748,6 @@ fn connection_columns(rect: egui::Rect) -> [egui::Rect; 6] {
         cell
     })
 }
-const PERIODS: [(i64, &str); 5] = [
-    (300, "5m"),
-    (3600, "1h"),
-    (86400, "24h"),
-    (604800, "7d"),
-    (2592000, "30d"),
-];
 fn filter_dropdown(
     ui: &mut egui::Ui,
     id: &str,
@@ -1695,6 +1765,8 @@ fn filter_dropdown(
                 .width(width)
                 .height(if multiple {
                     360.0
+                } else if id.ends_with("period") {
+                    440.0
                 } else {
                     ui.spacing().combo_height
                 })
@@ -2077,6 +2149,7 @@ mod compact_layout_tests {
         MonitorApp {
             worker: Worker::for_ui_test(),
             icons: IconCache::disabled(),
+            startup: crate::startup::Controller::preview(),
             tray: None,
             data: Shared::default(),
             settings: Settings::default(),
@@ -2094,6 +2167,7 @@ mod compact_layout_tests {
             data_dir: PathBuf::new(),
             view_warning: String::new(),
             show_graph_options: false,
+            custom_period: None,
             app_cache: Arc::default(),
             app_cache_key: None,
             breakdown_cache: Arc::default(),
@@ -2827,6 +2901,72 @@ mod compact_layout_tests {
         app_frame(app, ctx, size, click_events(pos)).0
     }
     #[test]
+    fn compact_period_menu_has_dense_rows_and_shows_longer_presets() {
+        let ctx = egui::Context::default();
+        Theme::Dark.apply(&ctx);
+        install_fonts(&ctx);
+        let mut app = app_fixture();
+        let mut output = click_app_control(&mut app, &ctx, "Period: 1h");
+        output.textures_delta.clear();
+        let (mut output, _, _) = app_frame(&mut app, &ctx, Vec2::new(1200.0, 820.0), vec![]);
+        let positions = text_positions(&output);
+        output.textures_delta.clear();
+        let at = |label| {
+            positions
+                .iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, position)| *position)
+                .unwrap_or_else(|| panic!("Missing period {label}"))
+        };
+        let first = at("5 minutes");
+        let second = at("15 minutes");
+        assert!(
+            second.y - first.y <= 24.0,
+            "Period rows have excessive spacing"
+        );
+        assert!(
+            at("1 year").y < 820.0,
+            "Longer presets require unnecessary scrolling"
+        );
+        assert!(at("Since beginning of month").y < first.y);
+    }
+    #[test]
+    fn expanded_period_menu_supports_both_views_and_custom_cancel() {
+        for source in [Source::Adapter, Source::Transport] {
+            let ctx = egui::Context::default();
+            Theme::Dark.apply(&ctx);
+            install_fonts(&ctx);
+            let mut app = app_fixture();
+            app.settings.filter.source = source;
+            for (caption, choice, seconds) in [
+                ("Period: 1h", "15 minutes", 900),
+                ("Period: 15m", "30 minutes", 1800),
+                (
+                    "Period: 30m",
+                    "Since beginning of month",
+                    PERIOD_MONTH_TO_DATE,
+                ),
+                ("Period: Month", "All time", 0),
+            ] {
+                let mut out = click_app_control(&mut app, &ctx, caption);
+                out.textures_delta.clear();
+                let mut out = click_app_control(&mut app, &ctx, choice);
+                out.textures_delta.clear();
+                assert_eq!(app.settings.filter.seconds, seconds);
+                assert!(app.settings.filter.time_range.is_none());
+            }
+            let mut out = click_app_control(&mut app, &ctx, "Period: All time");
+            out.textures_delta.clear();
+            let mut out = click_app_control(&mut app, &ctx, "Custom…");
+            out.textures_delta.clear();
+            assert!(app.custom_period.is_some());
+            let mut out = click_app_control(&mut app, &ctx, "Cancel");
+            out.textures_delta.clear();
+            assert!(app.custom_period.is_none());
+            assert!(app.settings.filter.all_time());
+        }
+    }
+    #[test]
     fn many_adapters_leave_wifi_choices_accessible() {
         let ctx = egui::Context::default();
         Theme::Dark.apply(&ctx);
@@ -2933,9 +3073,9 @@ mod compact_layout_tests {
         warm.textures_delta.clear();
         let mut out = click_app_control(&mut app, &ctx, "Period: 1h");
         out.textures_delta.clear();
-        let mut out = click_app_control(&mut app, &ctx, "24 hours");
+        let mut out = click_app_control(&mut app, &ctx, "30 minutes");
         out.textures_delta.clear();
-        assert_eq!(app.settings.filter.seconds, 86400);
+        assert_eq!(app.settings.filter.seconds, 1800);
         let mut out = click_app_control(&mut app, &ctx, "Adapters: All");
         out.textures_delta.clear();
         let mut out = click_app_control(&mut app, &ctx, "Ethernet");
@@ -3050,9 +3190,9 @@ mod compact_layout_tests {
         warm.textures_delta.clear();
         let mut out = click_app_control(&mut app, &ctx, "Period: 1h");
         out.textures_delta.clear();
-        let mut out = click_app_control(&mut app, &ctx, "24 hours");
+        let mut out = click_app_control(&mut app, &ctx, "30 minutes");
         out.textures_delta.clear();
-        assert_eq!(app.settings.filter.seconds, 86400);
+        assert_eq!(app.settings.filter.seconds, 1800);
         let mut out = click_app_control(&mut app, &ctx, "Adapters: All");
         out.textures_delta.clear();
         let mut out = click_app_control(&mut app, &ctx, "Ethernet");

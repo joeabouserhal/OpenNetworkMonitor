@@ -1,3 +1,4 @@
+use chrono::{Datelike, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -105,6 +106,15 @@ pub struct UsageRow {
     pub down: u64,
     pub up: u64,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeRange {
+    pub start: i64,
+    pub end: i64,
+}
+
+/// Dynamic calendar period; resolves again for each query, including after reopening.
+pub const PERIOD_MONTH_TO_DATE: i64 = -1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Filter {
     pub source: Source,
@@ -112,7 +122,10 @@ pub struct Filter {
     pub adapters: HashSet<String>,
     #[serde(default)]
     pub wifi_network: Option<String>,
+    /// Zero selects all saved history, -1 is month-to-date; positive values are rolling durations.
     pub seconds: i64,
+    #[serde(default)]
+    pub time_range: Option<TimeRange>,
     pub search: String,
     #[serde(default)]
     pub apps: HashSet<String>,
@@ -125,12 +138,41 @@ impl Default for Filter {
             adapters: HashSet::new(),
             wifi_network: None,
             seconds: 3600,
+            time_range: None,
             search: String::new(),
             apps: HashSet::new(),
         }
     }
 }
 impl Filter {
+    pub fn time_bounds(&self, now: i64) -> (i64, i64) {
+        if let Some(range) = self.time_range {
+            let start = range.start.max(0);
+            (start, range.end.max(start))
+        } else if self.month_to_date() {
+            let start = chrono::Local
+                .timestamp_opt(now, 0)
+                .single()
+                .map(month_start)
+                .unwrap_or(now);
+            (start, now)
+        } else {
+            (
+                if self.seconds <= 0 {
+                    0
+                } else {
+                    now.saturating_sub(self.seconds).max(0)
+                },
+                now,
+            )
+        }
+    }
+    pub fn month_to_date(&self) -> bool {
+        self.time_range.is_none() && self.seconds == PERIOD_MONTH_TO_DATE
+    }
+    pub fn all_time(&self) -> bool {
+        self.time_range.is_none() && self.seconds == 0
+    }
     pub fn matches(&self, row: &UsageRow) -> bool {
         row.source == self.source.key()
             && (self.apps.is_empty() || self.apps.contains(&row.app))
@@ -145,6 +187,27 @@ impl Filter {
                     .to_lowercase()
                     .contains(&self.search.to_lowercase()))
     }
+}
+/// Use local calendar boundaries, rather than assuming every month is 30 days
+/// or using today's UTC offset at a boundary where DST may have differed.
+fn month_start<T: TimeZone>(now: chrono::DateTime<T>) -> i64 {
+    let midnight = now
+        .date_naive()
+        .with_day(1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    // Some time zones skip or repeat midnight. Choose the first valid instant
+    // of the month, resolving repeated local times to their earlier occurrence.
+    (0..=2880)
+        .find_map(|minute| {
+            let local = midnight.checked_add_signed(chrono::Duration::minutes(minute))?;
+            now.timezone()
+                .from_local_datetime(&local)
+                .earliest()
+                .map(|time| time.timestamp())
+        })
+        .unwrap_or_else(|| now.timestamp())
 }
 #[derive(Debug, Clone, Default)]
 pub struct Point {
@@ -425,6 +488,55 @@ mod tests {
         assert_eq!(
             ipv4_from_windows(u32::from_ne_bytes([192, 168, 1, 10])).to_string(),
             "192.168.1.10"
+        );
+    }
+}
+
+#[cfg(test)]
+mod calendar_period_tests {
+    use super::*;
+    #[test]
+    fn month_to_date_uses_local_boundaries_and_rolls_into_the_next_month() {
+        let zone = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
+        let october = zone.with_ymd_and_hms(2026, 10, 29, 12, 30, 0).unwrap();
+        let first = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 30, 21, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(month_start(october), first);
+        let november = zone.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        assert_eq!(month_start(november), november.timestamp());
+        let january = zone.with_ymd_and_hms(2027, 1, 15, 12, 0, 0).unwrap();
+        assert_eq!(
+            month_start(january),
+            chrono::Utc
+                .with_ymd_and_hms(2026, 12, 31, 21, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
+        let filter = Filter {
+            seconds: PERIOD_MONTH_TO_DATE,
+            ..Default::default()
+        };
+        let saved = serde_json::to_string(&filter).unwrap();
+        let restored: Filter = serde_json::from_str(&saved).unwrap();
+        assert!(restored.month_to_date());
+        assert!(!restored.all_time());
+        let local = chrono::Local
+            .timestamp_opt(october.timestamp(), 0)
+            .single()
+            .unwrap();
+        assert_eq!(
+            restored.time_bounds(october.timestamp()),
+            (month_start(local), october.timestamp())
+        );
+        let local = chrono::Local
+            .timestamp_opt(november.timestamp(), 0)
+            .single()
+            .unwrap();
+        assert_eq!(
+            restored.time_bounds(november.timestamp()),
+            (month_start(local), november.timestamp())
         );
     }
 }

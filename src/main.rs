@@ -42,7 +42,15 @@ fn run() -> Result<()> {
     {
         return diagnose(&args);
     }
-    let _instance = capture::InstanceGuard::acquire()?;
+    let startup = args.iter().any(|a| a == "--startup");
+    let _instance = if startup {
+        let Some(instance) = capture::InstanceGuard::try_acquire()? else {
+            return Ok(());
+        };
+        instance
+    } else {
+        capture::InstanceGuard::acquire()?
+    };
     let data_dir =
         PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
             .join("OpenNetworkMonitor");
@@ -56,6 +64,7 @@ fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("OpenNetworkMonitor")
+            .with_visible(!startup)
             .with_inner_size(widgets::DEFAULT_WINDOW_SIZE)
             .with_min_inner_size(widgets::MIN_WINDOW_SIZE)
             .with_clamp_size_to_monitor_size(true)
