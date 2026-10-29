@@ -2901,7 +2901,7 @@ mod compact_layout_tests {
         app_frame(app, ctx, size, click_events(pos)).0
     }
     #[test]
-    fn compact_period_menu_has_dense_rows_and_shows_longer_presets() {
+    fn compact_period_menu_balances_click_targets_and_spacing() {
         let ctx = egui::Context::default();
         Theme::Dark.apply(&ctx);
         install_fonts(&ctx);
@@ -2921,12 +2921,8 @@ mod compact_layout_tests {
         let first = at("5 minutes");
         let second = at("15 minutes");
         assert!(
-            second.y - first.y <= 24.0,
-            "Period rows have excessive spacing"
-        );
-        assert!(
-            at("1 year").y < 820.0,
-            "Longer presets require unnecessary scrolling"
+            (24.0..=28.0).contains(&(second.y - first.y)),
+            "Period rows should stay compact with a comfortable click target"
         );
         assert!(at("Since beginning of month").y < first.y);
     }

@@ -35,7 +35,7 @@ pub(super) fn choice(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Re
     ui.add(
         egui::Button::selectable(selected, RichText::new(label).size(14.0))
             .small()
-            .min_size(Vec2::new(0.0, 20.0)),
+            .min_size(Vec2::new(0.0, 24.0)),
     )
 }
 

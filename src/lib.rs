@@ -1,4 +1,5 @@
 pub mod app;
+mod app_icon;
 pub mod capture;
 pub mod graph;
 pub mod hosts;

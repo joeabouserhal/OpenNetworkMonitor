@@ -2,6 +2,7 @@
 
 The dependency list and exact resolved versions are in Cargo.toml and Cargo.lock. Dependencies retain their respective licenses; this file is not a complete redistribution license bundle.
 
+- Build-time resource tools: [embed-resource](https://github.com/nabijaczleweli/rust-embed-resource) and [ico](https://github.com/mdsteele/rust-ico) (MIT).
 - egui / eframe: https://github.com/emilk/egui (MIT OR Apache-2.0).
 - FerrisETW: https://github.com/n4r1b/ferrisetw (MIT). The project credits Microsoft's KrabsETW.
 - tray-icon / muda / rfd: https://github.com/tauri-apps (MIT OR Apache-2.0, see individual crates).

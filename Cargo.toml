@@ -45,5 +45,9 @@ codegen-units = 1
 undocumented_unsafe_blocks = "warn"
 
 
+[build-dependencies]
+embed-resource = "3.0"
+ico = "0.6"
+
 [dev-dependencies]
 tempfile = "3"

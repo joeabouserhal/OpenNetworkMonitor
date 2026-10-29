@@ -13,20 +13,9 @@ pub struct Tray {
     pub exit: Arc<AtomicBool>,
 }
 pub fn icon_pixels() -> Vec<u8> {
-    let mut rgba = vec![0u8; 32 * 32 * 4];
-    for y in 0..32 {
-        for x in 0..32 {
-            let i = (y * 32 + x) * 4;
-            let bar = (6..11).contains(&x) && (17..26).contains(&y)
-                || (14..19).contains(&x) && (7..26).contains(&y)
-                || (22..27).contains(&x) && (12..26).contains(&y);
-            if bar {
-                rgba[i..i + 4].copy_from_slice(&[76, 199, 190, 255]);
-            }
-        }
-    }
-    rgba
+    crate::app_icon::pixels(32)
 }
+
 impl Tray {
     pub fn new(ctx: egui::Context) -> anyhow::Result<Self> {
         let menu = Menu::new();
