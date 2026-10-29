@@ -72,6 +72,7 @@ pub fn all_adapters() -> Result<Vec<Adapter>> {
             up: row.OperStatus == 1,
             physical: row.InterfaceAndOperStatusFlags._bitfield & 1 != 0,
             loopback: row.Type == 24,
+            is_wifi: row.Type == 71, // IF_TYPE_IEEE80211
             received: row.InOctets,
             sent: row.OutOctets,
             addresses: Vec::new(),

@@ -1,7 +1,7 @@
 use crate::{capture, model::*, store::Store};
 use anyhow::Result;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::atomic::Ordering,
@@ -162,6 +162,148 @@ fn read_histories(
     };
     Ok((history, summary))
 }
+#[derive(Clone, Debug)]
+struct WifiInterval {
+    network: String,
+    start_ms: i64,
+    end_ms: i64,
+}
+
+/// Keep confirmed, stable observation intervals for delayed ETW events. A
+/// transition leaves the interval between the two observations unidentified.
+#[derive(Default)]
+struct WifiTracker {
+    adapters: HashSet<String>,
+    active: HashMap<String, WifiInterval>,
+    past: VecDeque<(String, WifiInterval)>,
+    last_ms: Option<i64>,
+}
+impl WifiTracker {
+    fn observe(
+        &mut self,
+        now_ms: i64,
+        adapters: &HashSet<String>,
+        networks: &HashMap<String, WifiNetwork>,
+    ) {
+        self.adapters.extend(adapters.iter().cloned());
+        self.adapters.extend(networks.keys().cloned());
+        if self.last_ms.is_some_and(|last| now_ms < last) {
+            // A system clock adjustment invalidates the old timestamp mapping.
+            self.active.clear();
+            self.past.clear();
+        }
+        self.last_ms = Some(now_ms);
+        for adapter in &self.adapters {
+            let network = networks
+                .get(adapter)
+                .map_or(WIFI_UNKNOWN, |n| n.id.as_str());
+            if let Some(interval) = self.active.get_mut(adapter) {
+                if interval.network == network {
+                    interval.end_ms = now_ms;
+                    continue;
+                }
+                self.past.push_back((adapter.clone(), interval.clone()));
+            }
+            self.active.insert(
+                adapter.clone(),
+                WifiInterval {
+                    network: network.to_owned(),
+                    start_ms: now_ms,
+                    end_ms: now_ms,
+                },
+            );
+        }
+        let cutoff = now_ms.saturating_sub(120_000);
+        self.past.retain(|(_, interval)| interval.end_ms >= cutoff);
+        while self.past.len() > 4096 {
+            self.past.pop_front();
+        }
+    }
+    fn current(&self, adapter: &str) -> Option<&str> {
+        self.active.get(adapter).map(|v| v.network.as_str())
+    }
+    fn event_network(&self, adapter: &str, timestamp: i64) -> String {
+        if !self.adapters.contains(adapter) {
+            return String::new();
+        }
+        let start = timestamp.saturating_mul(1000);
+        let end = start.saturating_add(1000);
+        let contains = |span: &WifiInterval| span.start_ms <= start && span.end_ms >= end;
+        if let Some(span) = self.active.get(adapter).filter(|span| contains(span)) {
+            return span.network.clone();
+        }
+        self.past
+            .iter()
+            .rev()
+            .find(|(id, span)| id == adapter && contains(span))
+            .map_or_else(|| WIFI_UNKNOWN.to_owned(), |(_, span)| span.network.clone())
+    }
+    fn sample_network(&self, adapter: &str, previous: Option<&str>) -> String {
+        match self.current(adapter) {
+            None => String::new(),
+            Some(current) if previous == Some(current) => current.to_owned(),
+            Some(_) => WIFI_UNKNOWN.to_owned(),
+        }
+    }
+}
+// Events have second-resolution timestamps. Hold Wi-Fi events until another
+// observation confirms the end of their timestamp second. Bound the queue;
+// overflow and shutdown are processed immediately as unidentified when needed.
+struct BufferedEvent {
+    event: TrafficEvent,
+    adapter_id: String,
+    adapter: String,
+    scope: Scope,
+    queued_at: Instant,
+}
+#[derive(Default)]
+struct EventBuffer {
+    pending: VecDeque<BufferedEvent>,
+}
+impl EventBuffer {
+    const LIMIT: usize = 65_536;
+    fn ready(event: &BufferedEvent, tracker: &WifiTracker, flush: bool) -> bool {
+        flush
+            || !tracker.adapters.contains(&event.adapter_id)
+            || tracker.last_ms.is_some_and(|now| {
+                event.event.timestamp.saturating_mul(1000).saturating_add(1000) <= now
+            })
+            // A future timestamp after a clock adjustment must not wait forever.
+            || event.queued_at.elapsed() >= Duration::from_secs(3)
+    }
+    fn take_ready(&mut self, tracker: &WifiTracker, flush: bool) -> Vec<BufferedEvent> {
+        let mut ready = Vec::new();
+        let mut waiting = VecDeque::new();
+        for event in self.pending.drain(..) {
+            if Self::ready(&event, tracker, flush) {
+                ready.push(event);
+            } else {
+                waiting.push_back(event);
+            }
+        }
+        self.pending = waiting;
+        ready
+    }
+    fn push(
+        &mut self,
+        event: BufferedEvent,
+        tracker: &WifiTracker,
+        flush: bool,
+        ready: &mut Vec<BufferedEvent>,
+    ) {
+        if Self::ready(&event, tracker, flush) {
+            ready.push(event);
+        } else {
+            if self.pending.len() >= Self::LIMIT
+                && let Some(oldest) = self.pending.pop_front()
+            {
+                ready.push(oldest);
+            }
+            self.pending.push_back(event);
+        }
+    }
+}
+
 fn run(
     mut store: Store,
     mut filter: Filter,
@@ -176,6 +318,16 @@ fn run(
         notice(&shared, format!("Country database: {e}"));
     }
     let mut etw = capture::EtwCapture::start();
+    let mut wifi_monitor = capture::wifi::WifiMonitor::new();
+    let mut wifi_tracker = WifiTracker::default();
+    let mut wifi_catalog: HashMap<String, WifiNetwork> = store
+        .known_wifi_networks()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|network| (network.id.clone(), network))
+        .collect();
+    let mut wifi_catalog_dirty = false;
+    let mut previous_wifi = HashMap::<String, String>::new();
     let mut previous = HashMap::<String, (u64, u64)>::new();
     let mut names = HashMap::new();
     let mut labels = HashMap::new();
@@ -187,12 +339,33 @@ fn run(
         visible = ids;
         known.extend(visible.iter().cloned());
     }
+    let mut wifi_state = wifi_monitor.poll();
     if let Ok(adapters) = capture::all_adapters() {
+        wifi_state
+            .wifi_adapters
+            .extend(adapters.iter().filter(|a| a.is_wifi).map(|a| a.id.clone()));
         previous = adapters
             .into_iter()
             .filter(|a| visible.contains(&a.id))
             .map(|a| (a.id, (a.received, a.sent)))
             .collect();
+    }
+    wifi_tracker.observe(
+        chrono::Utc::now().timestamp_millis(),
+        &wifi_state.wifi_adapters,
+        &wifi_state.networks,
+    );
+    for (id, interval) in &wifi_tracker.active {
+        previous_wifi.insert(id.clone(), interval.network.clone());
+    }
+    for network in wifi_state.networks.values() {
+        if wifi_catalog.get(&network.id) != Some(network) {
+            wifi_catalog.insert(network.id.clone(), network.clone());
+            wifi_catalog_dirty = true;
+        }
+    }
+    if let Ok(mut state) = shared.lock() {
+        state.snapshot.wifi_networks = wifi_catalog.values().cloned().collect();
     }
     let mut tick = Instant::now();
     let mut last_refresh = Instant::now() - Duration::from_secs(10);
@@ -204,6 +377,7 @@ fn run(
     let mut pending = BTreeMap::<i64, Vec<UsageRow>>::new();
     let mut storage_failed = false;
     let mut pending_samples = Vec::<LiveTick>::new();
+    let mut event_buffer = EventBuffer::default();
     // Load saved data immediately; reopening must not wait for a new live sample.
     if let Ok((history, summary)) =
         read_histories(&store, &filter, &known, chrono::Utc::now().timestamp())
@@ -265,7 +439,8 @@ fn run(
                 }
             }
         }
-        if hosts.poll()
+        if !stop
+            && hosts.poll()
             && let Ok(mut state) = shared.lock()
         {
             state.snapshot.host_labels = hosts.labels();
@@ -292,6 +467,42 @@ fn run(
                     Vec::new()
                 }
             };
+            let mut wifi_state = wifi_monitor.poll();
+            wifi_state.wifi_adapters.extend(
+                all_adapters
+                    .iter()
+                    .filter(|a| a.is_wifi)
+                    .map(|a| a.id.clone()),
+            );
+            wifi_tracker.observe(
+                chrono::Utc::now().timestamp_millis(),
+                &wifi_state.wifi_adapters,
+                &wifi_state.networks,
+            );
+            for network in wifi_state.networks.values() {
+                if wifi_catalog.get(&network.id) != Some(network) {
+                    wifi_catalog.insert(network.id.clone(), network.clone());
+                    wifi_catalog_dirty = true;
+                }
+            }
+            if wifi_catalog_dirty {
+                let networks: Vec<_> = wifi_catalog.values().cloned().collect();
+                match store.remember_wifi_networks(&networks) {
+                    Ok(()) => wifi_catalog_dirty = false,
+                    Err(e) => snapshot
+                        .warnings
+                        .push(format!("Could not save Wi-Fi catalog: {e}")),
+                }
+            }
+            if !wifi_state.wifi_adapters.is_empty()
+                && let Some(warning) = wifi_state.warning
+            {
+                snapshot.warnings.push(warning);
+            }
+            snapshot.wifi_networks = wifi_catalog.values().cloned().collect();
+            snapshot
+                .wifi_networks
+                .sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
             if last_visibility.elapsed() >= Duration::from_secs(30) {
                 match capture::visible_adapter_ids() {
                     Ok(ids) => {
@@ -320,21 +531,27 @@ fn run(
             if last_names.elapsed() >= Duration::from_secs(5) {
                 match capture::process_names() {
                     Ok(n) => {
-                        labels.extend(capture::process_labels(&n));
+                        // Final event attribution still needs fresh PID names, but
+                        // display labels and socket inventories are no longer needed.
+                        if !stop {
+                            labels.extend(capture::process_labels(&n));
+                        }
                         names = n;
                     }
                     Err(e) => snapshot.warnings.push(e.to_string()),
                 }
-                match capture::connections(&names) {
-                    Ok(mut c) => {
-                        for r in &mut c {
-                            if let Ok(addr) = r.remote.parse::<SocketAddr>() {
-                                r.country = geo.country(addr.ip());
+                if !stop {
+                    match capture::connections(&names) {
+                        Ok(mut c) => {
+                            for r in &mut c {
+                                if let Ok(addr) = r.remote.parse::<SocketAddr>() {
+                                    r.country = geo.country(addr.ip());
+                                }
                             }
+                            connections = c;
                         }
-                        connections = c;
+                        Err(e) => snapshot.warnings.push(e.to_string()),
                     }
-                    Err(e) => snapshot.warnings.push(e.to_string()),
                 }
                 last_names = Instant::now();
             }
@@ -347,6 +564,8 @@ fn run(
                         source: "adapter".into(),
                         adapter_id: a.id.clone(),
                         adapter: a.name.clone(),
+                        wifi_network: wifi_tracker
+                            .sample_network(&a.id, previous_wifi.get(&a.id).map(String::as_str)),
                         scope: "Unknown".into(),
                         down: counter_delta(*down, a.received),
                         up: counter_delta(*up, a.sent),
@@ -355,6 +574,11 @@ fn run(
                 }
             }
             previous = current;
+            previous_wifi = wifi_tracker
+                .active
+                .iter()
+                .map(|(id, interval)| (id.clone(), interval.network.clone()))
+                .collect();
             let live_tick = LiveTick {
                 timestamp: now,
                 interval,
@@ -362,10 +586,17 @@ fn run(
                     .iter()
                     .map(|r| (r.adapter_id.clone(), (r.down, r.up)))
                     .collect(),
+                wifi_networks: rows
+                    .iter()
+                    .map(|r| (r.adapter_id.clone(), r.wifi_network.clone()))
+                    .collect(),
             };
             pending_samples.push(live_tick);
-            let mut event_rows =
-                BTreeMap::<(i64, String, u32, String, String, String, String), UsageRow>::new();
+            let mut event_rows = BTreeMap::<
+                (i64, String, u32, String, String, String, String, String),
+                UsageRow,
+            >::new();
+            let mut ready_events = event_buffer.take_ready(&wifi_tracker, stop);
             match &etw {
                 Ok(c) => {
                     snapshot.etw_active = true;
@@ -373,13 +604,14 @@ fn run(
                     snapshot.parsed_events = c.stats.parsed.load(Ordering::Relaxed);
                     snapshot.parse_errors = c.stats.errors.load(Ordering::Relaxed);
                     snapshot.queue_drops = c.stats.drops.load(Ordering::Relaxed);
-                    match c.health() {
-                        Ok(lost) => snapshot.kernel_losses = lost,
-                        Err(e) if !stop => {
-                            snapshot.etw_active = false;
-                            snapshot.warnings.push(e.to_string());
+                    if !stop {
+                        match c.health() {
+                            Ok(lost) => snapshot.kernel_losses = lost,
+                            Err(e) => {
+                                snapshot.etw_active = false;
+                                snapshot.warnings.push(e.to_string());
+                            }
                         }
-                        _ => {}
                     }
                     for event in c.events.try_iter().take(65_536) {
                         let adapter = adapter_for(event.local, &all_adapters);
@@ -387,46 +619,68 @@ fn run(
                             event.remote,
                             adapter.map(|a| a.addresses.as_slice()).unwrap_or(&[]),
                         );
-                        let adapter_id = adapter.map(|a| a.id.as_str()).unwrap_or("unassigned");
-                        let remote = normalize_ip(event.remote).to_string();
-                        let traffic_type = crate::traffic::classify(
-                            event.protocol,
-                            event.local_port,
-                            event.remote_port,
-                        )
-                        .to_owned();
-                        let key = (
-                            event.timestamp / 60 * 60,
-                            adapter_id.to_owned(),
-                            event.pid,
-                            remote.clone(),
-                            event.protocol.into(),
-                            scope.key().into(),
-                            traffic_type.clone(),
+                        event_buffer.push(
+                            BufferedEvent {
+                                event,
+                                adapter_id: adapter
+                                    .map(|a| a.id.clone())
+                                    .unwrap_or_else(|| "unassigned".into()),
+                                adapter: adapter
+                                    .map(|a| a.name.clone())
+                                    .unwrap_or_else(|| "Unassigned".into()),
+                                scope,
+                                queued_at: Instant::now(),
+                            },
+                            &wifi_tracker,
+                            stop,
+                            &mut ready_events,
                         );
-                        let row = event_rows.entry(key).or_insert_with(|| UsageRow {
-                            traffic_type,
-                            source: "transport".into(),
-                            adapter_id: adapter_id.into(),
-                            adapter: adapter
-                                .map(|a| a.name.clone())
-                                .unwrap_or_else(|| "Unassigned".into()),
-                            app: names
-                                .get(&event.pid)
-                                .cloned()
-                                .unwrap_or_else(|| format!("Process {}", event.pid)),
-                            pid: event.pid,
-                            remote,
-                            country: geo.country(event.remote),
-                            protocol: event.protocol.into(),
-                            scope: scope.key().into(),
-                            ..Default::default()
-                        });
-                        row.down += event.down;
-                        row.up += event.up;
                     }
                 }
                 Err(e) => snapshot.capture_status = e.to_string(),
+            }
+            for buffered in ready_events {
+                let BufferedEvent {
+                    event,
+                    adapter_id,
+                    adapter,
+                    scope,
+                    ..
+                } = buffered;
+                let wifi_network = wifi_tracker.event_network(&adapter_id, event.timestamp);
+                let remote = normalize_ip(event.remote).to_string();
+                let traffic_type =
+                    crate::traffic::classify(event.protocol, event.local_port, event.remote_port)
+                        .to_owned();
+                let key = (
+                    event.timestamp / 60 * 60,
+                    adapter_id.to_owned(),
+                    event.pid,
+                    remote.clone(),
+                    event.protocol.into(),
+                    scope.key().into(),
+                    traffic_type.clone(),
+                    wifi_network.clone(),
+                );
+                let row = event_rows.entry(key).or_insert_with(|| UsageRow {
+                    traffic_type,
+                    wifi_network,
+                    source: "transport".into(),
+                    adapter_id,
+                    adapter,
+                    app: names
+                        .get(&event.pid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Process {}", event.pid)),
+                    pid: event.pid,
+                    remote,
+                    country: geo.country(event.remote),
+                    protocol: event.protocol.into(),
+                    scope: scope.key().into(),
+                    ..Default::default()
+                });
+                row.down += event.down;
+                row.up += event.up;
             }
             if !storage_failed {
                 pending
@@ -450,6 +704,15 @@ fn run(
                     pending.clear();
                     pending_samples.clear();
                 }
+            }
+            // The final ETW buffers and adapter sample have now been collected
+            // and a transactional write attempted. Don't rebuild UI snapshots,
+            // reread history, or prune while exiting.
+            if stop {
+                if let Err(e) = store.checkpoint() {
+                    notice(&shared, format!("Final history checkpoint: {e}"));
+                }
+                break;
             }
             if storage_failed {
                 snapshot.warnings.push("History recording stopped after repeated storage failures. Restart after fixing disk access.".into());
@@ -481,7 +744,6 @@ fn run(
         };
         if (refresh && !visible.is_empty())
             || (sample && last_refresh.elapsed() >= refresh_interval)
-            || stop
         {
             match read_histories(&store, &filter, &known, chrono::Utc::now().timestamp()) {
                 Ok((history, summary)) => {
@@ -513,12 +775,6 @@ fn run(
             last_refresh = Instant::now();
         }
         ctx.request_repaint();
-        if stop {
-            if let Err(e) = store.checkpoint() {
-                notice(&shared, format!("Final history checkpoint: {e}"));
-            }
-            break;
-        }
     }
 }
 
@@ -686,11 +942,112 @@ mod tests {
     }
 
     #[test]
+    fn wifi_timeline_keeps_switch_intervals_and_unobserved_events_unknown() {
+        let mut tracker = WifiTracker::default();
+        let adapters = HashSet::from(["wifi".to_owned()]);
+        let home = HashMap::from([(
+            "wifi".to_owned(),
+            WifiNetwork {
+                id: "ssid:home".into(),
+                name: "Home".into(),
+            },
+        )]);
+        let office = HashMap::from([(
+            "wifi".to_owned(),
+            WifiNetwork {
+                id: "ssid:office".into(),
+                name: "Office".into(),
+            },
+        )]);
+        tracker.observe(300, &adapters, &home);
+        assert_eq!(tracker.sample_network("wifi", None), WIFI_UNKNOWN);
+        tracker.observe(1300, &adapters, &home);
+        tracker.observe(2300, &adapters, &home);
+        assert_eq!(tracker.event_network("wifi", 1), "ssid:home");
+        assert_eq!(tracker.event_network("wifi", 0), WIFI_UNKNOWN);
+        assert_eq!(
+            tracker.sample_network("wifi", Some("ssid:home")),
+            "ssid:home"
+        );
+        tracker.observe(3300, &adapters, &office);
+        assert_eq!(
+            tracker.sample_network("wifi", Some("ssid:home")),
+            WIFI_UNKNOWN
+        );
+        assert_eq!(tracker.event_network("wifi", 2), WIFI_UNKNOWN);
+        assert_eq!(tracker.event_network("wifi", 1), "ssid:home");
+        tracker.observe(4300, &adapters, &office);
+        tracker.observe(5300, &adapters, &office);
+        assert_eq!(tracker.event_network("wifi", 4), "ssid:office");
+        assert_eq!(tracker.event_network("ethernet", 4), "");
+        tracker.observe(6300, &adapters, &HashMap::new());
+        assert_eq!(
+            tracker.sample_network("wifi", Some("ssid:office")),
+            WIFI_UNKNOWN
+        );
+        tracker.observe(100, &adapters, &home);
+        assert_eq!(tracker.event_network("wifi", 1), WIFI_UNKNOWN);
+    }
+    #[test]
+    fn wifi_events_wait_for_confirmed_timestamp_and_flush_on_exit() {
+        let mut tracker = WifiTracker::default();
+        let adapters = HashSet::from(["wifi".into()]);
+        let networks = HashMap::from([(
+            "wifi".into(),
+            WifiNetwork {
+                id: "home".into(),
+                name: "Home".into(),
+            },
+        )]);
+        tracker.observe(100, &adapters, &networks);
+        tracker.observe(1100, &adapters, &networks);
+        let make_event = || BufferedEvent {
+            event: TrafficEvent {
+                local_port: 10,
+                remote_port: 443,
+                timestamp: 1,
+                pid: 1,
+                local: "192.168.0.2".parse().unwrap(),
+                remote: "1.1.1.1".parse().unwrap(),
+                protocol: "TCP",
+                down: 7,
+                up: 0,
+            },
+            adapter_id: "wifi".into(),
+            adapter: "Wi-Fi".into(),
+            scope: Scope::Wan,
+            queued_at: Instant::now(),
+        };
+        let mut buffer = EventBuffer::default();
+        let mut ready = Vec::new();
+        buffer.push(make_event(), &tracker, false, &mut ready);
+        assert!(ready.is_empty());
+        assert!(buffer.take_ready(&tracker, false).is_empty());
+        tracker.observe(2100, &adapters, &networks);
+        let ready = buffer.take_ready(&tracker, false);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            tracker.event_network(&ready[0].adapter_id, ready[0].event.timestamp),
+            "home"
+        );
+
+        let mut next = make_event();
+        next.event.timestamp = 2;
+        buffer.push(next, &tracker, false, &mut Vec::new());
+        let flushed = buffer.take_ready(&tracker, true);
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(
+            tracker.event_network(&flushed[0].adapter_id, flushed[0].event.timestamp),
+            WIFI_UNKNOWN
+        );
+    }
+    #[test]
     fn live_points_follow_selected_adapter_and_actual_interval() {
         let sample = LiveTick {
             timestamp: 100,
             interval: 0.5,
             adapters: HashMap::from([("a".into(), (500, 100)), ("b".into(), (1000, 200))]),
+            wifi_networks: HashMap::new(),
         };
         assert_eq!(sample.point(&HashSet::from(["a".into()])).down, 1000);
         assert_eq!(sample.point(&HashSet::new()).up, 600);
@@ -700,6 +1057,113 @@ mod tests {
 #[cfg(test)]
 mod native_restart_test {
     use super::*;
+    #[test]
+    #[ignore = "Requires elevated ETW access and generates local traffic in a temporary database"]
+    fn graceful_exit_preserves_final_tcp_events_and_adapter_samples() -> Result<()> {
+        use std::{
+            io::{Read, Write},
+            net::{TcpListener, TcpStream},
+        };
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("final-tcp-events.db");
+        let mut worker = Worker::start(
+            Store::open(&path)?,
+            Filter::default(),
+            None,
+            eframe::egui::Context::default(),
+        )?;
+        let started = Instant::now();
+        loop {
+            if worker
+                .shared
+                .lock()
+                .map(|s| s.snapshot.etw_active)
+                .unwrap_or(false)
+            {
+                break;
+            }
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(5),
+                "ETW capture is unavailable; run the test as administrator"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        // Generate known TCP traffic just before stopping the producer. The
+        // temporary store must contain the final, drained ETW events after exit.
+        const PAYLOAD_BYTES: usize = 256 * 1024;
+        let listener = TcpListener::bind("127.0.0.2:0")?;
+        let address = listener.local_addr()?;
+        let reader = thread::spawn(move || -> std::io::Result<usize> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut total = 0;
+            let mut buffer = [0u8; 16384];
+            loop {
+                let n = stream.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                total += n;
+            }
+            Ok(total)
+        });
+        let mut stream = TcpStream::connect(address)?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        stream.write_all(&vec![42u8; PAYLOAD_BYTES])?;
+        drop(stream);
+        anyhow::ensure!(
+            reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("TCP test reader stopped"))??
+                == PAYLOAD_BYTES,
+            "TCP test payload was not delivered"
+        );
+        let last_sample_time = chrono::Utc::now().timestamp();
+        let shutdown_started = Instant::now();
+        worker.shutdown();
+        let shutdown_elapsed = shutdown_started.elapsed();
+
+        let saved = Store::open(&path)?;
+        let now = chrono::Utc::now().timestamp();
+        let app_history = saved.history(
+            &Filter {
+                source: Source::Transport,
+                seconds: 300,
+                ..Default::default()
+            },
+            now,
+        )?;
+        let (down, up) = app_history
+            .rows
+            .iter()
+            .filter(|r| r.pid == std::process::id() && r.protocol == "TCP")
+            .fold((0u64, 0u64), |(d, u), r| (d + r.down, u + r.up));
+        anyhow::ensure!(
+            (down, up) == (PAYLOAD_BYTES as u64, PAYLOAD_BYTES as u64),
+            "Final TCP bytes did not survive shutdown: downloaded {down}, uploaded {up}"
+        );
+        let adapter_history = saved.history(
+            &Filter {
+                seconds: 300,
+                ..Default::default()
+            },
+            now,
+        )?;
+        anyhow::ensure!(
+            adapter_history
+                .points
+                .iter()
+                .any(|p| p.observed && p.timestamp >= last_sample_time),
+            "Final adapter sample did not survive shutdown"
+        );
+        println!(
+            "Final TCP bytes and adapter sample restored; worker shutdown took {:.1} ms",
+            shutdown_elapsed.as_secs_f64() * 1000.0
+        );
+        Ok(())
+    }
+
     #[test]
     #[ignore = "Uses the local Windows adapter inventory and a temporary database"]
     fn graceful_exit_and_immediate_reopen_restore_the_recent_chart() -> Result<()> {

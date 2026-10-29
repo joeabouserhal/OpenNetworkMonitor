@@ -50,6 +50,7 @@ pub struct Adapter {
     pub index: u32,
     pub up: bool,
     pub physical: bool,
+    pub is_wifi: bool,
     pub loopback: bool,
     pub received: u64,
     pub sent: u64,
@@ -77,6 +78,15 @@ pub struct TrafficEvent {
     pub down: u64,
     pub up: u64,
 }
+/// Traffic observed on Wi-Fi while the connected network is unavailable or changing.
+pub const WIFI_UNKNOWN: &str = "__wifi_unknown__";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WifiNetwork {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageRow {
     #[serde(default)]
@@ -84,6 +94,8 @@ pub struct UsageRow {
     pub source: String,
     pub adapter_id: String,
     pub adapter: String,
+    #[serde(default)]
+    pub wifi_network: String,
     pub app: String,
     pub pid: u32,
     pub remote: String,
@@ -98,6 +110,8 @@ pub struct Filter {
     pub source: Source,
     pub scope: Scope,
     pub adapters: HashSet<String>,
+    #[serde(default)]
+    pub wifi_network: Option<String>,
     pub seconds: i64,
     pub search: String,
     #[serde(default)]
@@ -109,6 +123,7 @@ impl Default for Filter {
             source: Source::Adapter,
             scope: Scope::All,
             adapters: HashSet::new(),
+            wifi_network: None,
             seconds: 3600,
             search: String::new(),
             apps: HashSet::new(),
@@ -120,6 +135,10 @@ impl Filter {
         row.source == self.source.key()
             && (self.apps.is_empty() || self.apps.contains(&row.app))
             && (self.adapters.is_empty() || self.adapters.contains(&row.adapter_id))
+            && self
+                .wifi_network
+                .as_ref()
+                .is_none_or(|id| id == &row.wifi_network)
             && (self.scope == Scope::All || self.scope.key() == row.scope)
             && (self.search.is_empty()
                 || format!("{} {} {} {}", row.app, row.remote, row.adapter, row.country)
@@ -166,6 +185,7 @@ pub struct Snapshot {
     pub app_labels: HashMap<String, String>,
     pub host_labels: HashMap<String, String>,
     pub adapters: Vec<Adapter>,
+    pub wifi_networks: Vec<WifiNetwork>,
     pub connections: Vec<Connection>,
     pub live_rows: Vec<UsageRow>,
     pub interval: f64,
@@ -182,6 +202,7 @@ pub struct LiveTick {
     pub timestamp: i64,
     pub interval: f64,
     pub adapters: HashMap<String, (u64, u64)>,
+    pub wifi_networks: HashMap<String, String>,
 }
 impl LiveTick {
     pub fn point(&self, selected: &HashSet<String>) -> Point {

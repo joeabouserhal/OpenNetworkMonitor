@@ -1,5 +1,13 @@
 use super::*;
 
+const PREVIEW_PATHS: [&str; 5] = [
+    r"C:\Program Files\Helium\Application\chrome.exe",
+    r"C:\Program Files (x86)\Steam\steam.exe",
+    r"C:\Apps\Editor\Code.exe",
+    r"C:\Program Files\Music\player.exe",
+    r"C:\Tools\plain.exe",
+];
+
 impl MonitorApp {
     /// Isolated visual-development harness: no tray, capture, user settings or history writes.
     #[cfg(feature = "ui-preview")]
@@ -14,6 +22,7 @@ impl MonitorApp {
         ctx.set_zoom_factor(settings.ui_scale);
         let mut app = Self {
             worker: Worker::for_ui_test(),
+            icons: IconCache::disabled(),
             tray: None,
             data: Shared::default(),
             settings,
@@ -35,7 +44,6 @@ impl MonitorApp {
             app_search: String::new(),
             data_dir: PathBuf::from(r"C:\Users\Example\AppData\Local\OpenNetworkMonitor"),
             view_warning: String::new(),
-            show_filters: false,
             show_graph_options: false,
             app_cache: Arc::default(),
             app_cache_key: None,
@@ -45,6 +53,28 @@ impl MonitorApp {
         };
         if page == "apps" {
             app.settings.filter.source = Source::Transport;
+            // Generated sample icons keep previews independent of installed apps.
+            for (i, path) in PREVIEW_PATHS.iter().enumerate() {
+                let colors = [
+                    Color32::from_rgb(68, 137, 117),
+                    Color32::from_rgb(76, 105, 143),
+                    Color32::from_rgb(145, 109, 158),
+                    Color32::from_rgb(183, 119, 77),
+                    Color32::from_rgb(105, 112, 125),
+                ];
+                let mut pixels = vec![Color32::TRANSPARENT; 32 * 32];
+                for y in 3..29 {
+                    for x in 3..29 {
+                        pixels[y * 32 + x] = if (9..23).contains(&x) && (9..23).contains(&y) {
+                            Color32::from_rgb(235, 239, 239)
+                        } else {
+                            colors[i]
+                        };
+                    }
+                }
+                app.icons
+                    .insert_preview(ctx, path, egui::ColorImage::new([32, 32], pixels));
+            }
         }
         app.refresh_preview();
         app
@@ -57,13 +87,7 @@ impl MonitorApp {
             return;
         }
         let now = chrono::Utc::now().timestamp();
-        let paths = [
-            r"C:\Program Files\Helium\Application\chrome.exe",
-            r"C:\Program Files (x86)\Steam\steam.exe",
-            r"C:\Apps\Editor\Code.exe",
-            r"C:\Program Files\Music\player.exe",
-            r"C:\Tools\plain.exe",
-        ];
+        let paths = PREVIEW_PATHS;
         let names = [
             "Helium",
             "Steam",
@@ -194,6 +218,16 @@ impl MonitorApp {
             ..Default::default()
         })
         .collect();
+        self.data.snapshot.wifi_networks = vec![
+            WifiNetwork {
+                id: "sample-home".into(),
+                name: "Home Wi-Fi".into(),
+            },
+            WifiNetwork {
+                id: "sample-office".into(),
+                name: "Office Wi-Fi".into(),
+            },
+        ];
         self.data.snapshot.live_rows = rows
             .iter()
             .cloned()

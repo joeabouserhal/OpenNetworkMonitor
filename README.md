@@ -27,7 +27,7 @@ cargo build --locked --release
 
 The executable now embeds an administrator requirement. Opening it requests Windows approval automatically, so detailed per-application monitoring starts with the required access. Build normally, then open the executable through Explorer; use an elevated terminal for `cargo run` or command-line diagnostics. The app does not install a driver, service, firewall rule, scheduled task, or startup entry.
 
-Closing the window hides it to the system tray by default. Left-click the tray icon to reopen it; right-click → **Exit** stops the app directly. If creating the tray fails, closing the window exits instead. The process must remain running to record traffic.
+Closing the window hides it to the system tray by default. Left-click the tray icon to reopen it; right-click → **Exit** hides the window immediately and stops the app after saving its final data. If creating the tray fails, closing the window exits instead. The process must remain running to record traffic.
 
 ## Screenshots
 
@@ -40,10 +40,11 @@ These previews use generated sample data.
 
 - Native live adapter counters for the same present, non-hidden interfaces shown by Windows, including real disconnected Ethernet, Wi-Fi and VPN adapters. Hidden/filter/loopback entries stay out of the visible inventory. A persistent catalog retains usage when an adapter is unplugged.
 - Native ETW kernel capture of TCP and UDP transfer events, IPv4 and IPv6, attributed using each event's payload PID.
+- Filter recorded Wi-Fi traffic by connection name from the Adapters menu in either traffic view. The selection works with period, adapter and network filters and applies to CSV exports.
 - Upload/download, LAN/WAN/Unknown classification, adapter association from the local address, and an explicit Unassigned category.
-- Two Overview buttons: **Overall Traffic** and **App traffic**. The compact adapter view fits its chart, compact upload/download summary and horizontal LAN/WAN breakdown without scrolling at the supported minimum window size. Its chart uses smooth, shape-preserving curves within exactly the selected usage period; recorded samples stay unchanged and unrecorded intervals remain blank. Overall Traffic keeps quick period buttons; App traffic puts search, period, multi-adapter and network dropdowns on one line. Advanced chart controls are tucked away.
+- Two Overview buttons: **Overall Traffic** and **App traffic**. The compact adapter view fits its chart, compact upload/download summary and horizontal LAN/WAN breakdown without scrolling at the supported minimum window size. Its chart uses smooth, shape-preserving curves within exactly the selected usage period; recorded samples stay unchanged and unrecorded intervals remain blank. Both views use matching period and multi-adapter dropdowns; App traffic adds a network dropdown and search on the same line, followed by a compact total download/upload summary with a proportional bar below the lists. Advanced chart controls are tucked away.
 - The Overall Traffic footer includes the **top five apps** by combined upload/download, using the selected period and adapters. With All adapters selected, this matches App traffic and includes loopback and unattributed transfers. Totals and the LAN/WAN bar share a compact band without repeating the period. The default window is wider; existing windows widen once for this layout and then retain later resizing.
-- Dense 56-point rows in App traffic, with smaller directories/host/type descriptions and Down/Up figures. Overview omits the descriptive subtitle and the list omits the standing selection hint. Selected apps can be cleared from the Apps heading.
+- Dense 56-point rows in App traffic show Windows executable icons with a fallback when unavailable, alongside smaller directories/host/type descriptions and Down/Up figures. Overview omits the descriptive subtitle and the list omits the standing selection hint. Selected apps can be cleared from the Apps heading.
 - Three compact, independently scrolling columns: **Apps**, **Hosts** and **Traffic type**, each ranked by combined upload and download in the selected usage period. App names show the executable directory directly below; absent friendly metadata, the exact executable filename is kept. Selecting an app filters the adjacent lists; selecting it again or choosing All apps clears that selection. Live rates remain in app tooltips.
 - Background host-name resolution through the Windows system resolver, with IP fallback. Common traffic types (HTTP, HTTPS/TLS, DNS, QUIC and others) are inferred from connection ports and saved with history. No payload inspection or decryption is performed.
 - Live TCP connection and UDP socket inventory, process names, local/remote endpoints, protocol and state.
@@ -61,11 +62,15 @@ These previews use generated sample data.
 
 **Overall Traffic** uses `GetIfTable2` interface-counter deltas, sampled approximately once per second. This does **not** use the historical Windows Settings → Data Usage/NDU store. It counts interface bytes across all protocols. Counters are baselined on startup; traffic before the app started is not imported. Resets and adapter reconnects do not create negative totals or wraparound spikes.
 
+**Wi-Fi connections** are grouped by their network name (SSID), including the same name seen on multiple adapters. The Adapters menu lists connections observed while the app is running and offers an Unidentified Wi-Fi option for observations that cannot be confidently assigned. Network changes between samples and Windows lookup failures can leave some traffic unidentified; a very brief switch between observations may not be detected. Past traffic recorded before this feature remains in all-connection totals but cannot be assigned to a specific network. App traffic is associated with a Wi-Fi connection only when its local address can be matched to a Wi-Fi adapter; VPN and other traffic that cannot be matched may be excluded from a named connection view. Wi-Fi names are stored locally in the usage database and retained in its catalog even after the corresponding usage history expires.
+
 **App traffic** uses built-in ETW kernel TCP/IP and UDP/IP send/receive events through FerrisETW. It does not require Npcap. App totals reflect observed TCP/UDP transport events, not every link-layer byte or protocol. ACK/connect/retransmit event types are not added as separate usage. If capture cannot start, the UI explains why; adapter traffic is still collected.
 
 The LAN/WAN bar summarizes captured TCP/UDP app traffic over the same selected adapter/history scope; its total is kept separate from interface-counter totals because the two measurements represent different layers. In App traffic mode, All adapters includes observed transport traffic including loopback; explicit adapter choices restrict it to those interfaces.
 
 The two sources are **never added together**. Selecting every physical and virtual adapter is a sum of adapter observations, which may count the same traffic at several layers. VPN traffic may appear as inner application traffic and outer encrypted traffic belonging to a VPN process. This version does not claim a deduplicated all-PC internet total across arbitrary VPNs. Select a physical adapter for its observed wire traffic, or select particular application/transport views for their observed traffic. Validating the exact VPN stack is part of the next milestone.
+
+TCP downloads recorded before the receive-endpoint fix can have an incorrect destination, adapter, network classification and traffic type. The original remote endpoint was not saved, so these historical details cannot be reliably reconstructed; new traffic uses the corrected mapping.
 
 LAN includes private, loopback, link-local, multicast, broadcast and on-link destinations. WAN means public destinations; reserved/shared ranges are Unknown. This is an address-based classification, not proof of a routing boundary. Public destinations routed through a private gateway remain WAN. Adapter association is inferred from a unique local-address match; ambiguous matches remain Unassigned.
 
@@ -84,15 +89,18 @@ cargo clippy --all-targets -- -D warnings
 cargo run -- --diagnose 8
 # In an elevated terminal:
 cargo run -- --self-test-capture
+# Optional: a small HTTP test to 1.1.1.1:80
+cargo run -- --self-test-public
 ```
 
-`--diagnose` prints adapter inventory, connection/process counts, per-protocol observed events, byte deltas and loss counters. `--self-test-capture` generates known local TCP and UDP payloads over IPv4 and IPv6, verifies payload delivery, and checks attribution to the test process for all four protocol families. Diagnostics do not write usage history. They do not change network configuration or install anything.
+`--diagnose` prints adapter inventory, connection/process counts, per-protocol observed events, byte deltas and loss counters. `--self-test-capture` generates known local TCP and UDP payloads over IPv4 and IPv6 and checks payload delivery and endpoint attribution. `--self-test-public` makes a small, fixed HTTP request to 1.1.1.1:80 and checks the captured TCP endpoints, adapter, WAN classification and byte counts. The diagnostic process does not write usage history, though an already running monitor can record its test traffic. Neither test changes network configuration or installs anything.
 
 See [docs/ADMIN.md](docs/ADMIN.md) for administrator-launch details, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md), and [docs/VALIDATION.md](docs/VALIDATION.md). Build/test status is recorded in the validation document, including checks that could not be completed.
 
 ## Sources
 
 - [Microsoft: GetIfTable2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2)
+- [Microsoft: connected Wi-Fi network name](https://learn.microsoft.com/en-us/uwp/api/windows.networking.connectivity.wlanconnectionprofiledetails.getconnectedssid)
 - [Microsoft: TCP/IP ETW events](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip)
 - [Microsoft: UDP IPv4 transfer events](https://learn.microsoft.com/en-us/windows/win32/etw/udpip-typegroup1)
 - [Microsoft: GetExtendedTcpTable](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable)
@@ -103,7 +111,7 @@ MIT license. Theme and dependency credits are in [THIRD_PARTY.md](THIRD_PARTY.md
 
 ## Storage reliability
 
-Live adapter samples and usage totals commit together, using SQLite FULL synchronization. A normal exit stops the event producer, drains its final buffers, commits the last partial sample and checkpoints the database before the worker finishes. Saved chart data loads before the first new live tick after reopening. SQLite integrity is checked on open; corrupted history is reported rather than silently replaced with an empty database. The bundled SQLite version is 3.54.1.
+Live adapter samples and usage totals commit together, using SQLite FULL synchronization. A normal exit stops the event producer, drains its final buffers, commits the last partial sample and performs a nonblocking database checkpoint before the worker finishes. If another reader holds the database, committed data stays in the WAL until it can be checkpointed later. Saved chart data loads before the first new live tick after reopening. SQLite integrity is checked on open; corrupted history is reported rather than silently replaced with an empty database. The bundled SQLite version is 3.54.1.
 
 ## UI development
 

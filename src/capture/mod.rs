@@ -1,5 +1,6 @@
 mod etw;
 mod identity;
+pub mod wifi;
 mod windows;
 pub use etw::EtwCapture;
 pub use identity::process_labels;

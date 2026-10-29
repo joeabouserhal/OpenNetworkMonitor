@@ -1,5 +1,6 @@
 use crate::model::{
     Adapter, AppUsage, Filter, History, LiveTick, Point, ScopeTotals, TransportSummary, UsageRow,
+    WIFI_UNKNOWN, WifiNetwork,
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -12,6 +13,11 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let mut db = Connection::open(path).context("Open usage database")?;
         db.busy_timeout(std::time::Duration::from_secs(3))?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            version <= 5,
+            "History was created by a newer OpenNetworkMonitor version"
+        );
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS traffic (
@@ -47,9 +53,42 @@ impl Store {
                 CREATE INDEX traffic_time_source ON traffic(source,minute);
                 PRAGMA user_version=4;")?;
             tx.commit()?;
-        } else {
-            db.pragma_update(None, "user_version", 4)?;
         }
+        // Rebuild both primary keys together. Legacy traffic has no recoverable
+        // Wi-Fi identity, so keep it distinct from newly observed networks.
+        let columns = |db: &Connection, table: &str| -> Result<Vec<String>> {
+            let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
+            Ok(stmt
+                .query_map([], |r| r.get(1))?
+                .collect::<rusqlite::Result<_>>()?)
+        };
+        let has_traffic_wifi = columns(&db, "traffic")?
+            .iter()
+            .any(|name| name == "wifi_network");
+        let has_sample_wifi = columns(&db, "adapter_samples")?
+            .iter()
+            .any(|name| name == "wifi_network");
+        anyhow::ensure!(
+            has_traffic_wifi == has_sample_wifi,
+            "History Wi-Fi schema is incomplete"
+        );
+        let tx = db.transaction()?;
+        if !has_traffic_wifi {
+            tx.execute_batch("ALTER TABLE traffic RENAME TO traffic_v4;
+                CREATE TABLE traffic(minute INTEGER NOT NULL,source TEXT NOT NULL,adapter_id TEXT NOT NULL,adapter TEXT NOT NULL,app TEXT NOT NULL,pid INTEGER NOT NULL,remote TEXT NOT NULL,country TEXT NOT NULL,protocol TEXT NOT NULL,scope TEXT NOT NULL,down INTEGER NOT NULL,up INTEGER NOT NULL,traffic_type TEXT NOT NULL DEFAULT '',wifi_network TEXT NOT NULL DEFAULT '',PRIMARY KEY(minute,source,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network));
+                INSERT INTO traffic SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,'' FROM traffic_v4;
+                DROP TABLE traffic_v4;
+                CREATE INDEX traffic_time_source ON traffic(source,minute);
+                ALTER TABLE adapter_samples RENAME TO adapter_samples_v4;
+                CREATE TABLE adapter_samples(timestamp INTEGER NOT NULL,adapter_id TEXT NOT NULL,down INTEGER NOT NULL,up INTEGER NOT NULL,elapsed REAL NOT NULL,wifi_network TEXT NOT NULL DEFAULT '',PRIMARY KEY(timestamp,adapter_id,wifi_network));
+                INSERT INTO adapter_samples SELECT timestamp,adapter_id,down,up,elapsed,'' FROM adapter_samples_v4;
+                DROP TABLE adapter_samples_v4;")?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS wifi_networks(id TEXT PRIMARY KEY,name TEXT NOT NULL);
+            PRAGMA user_version=5;",
+        )?;
+        tx.commit()?;
         Ok(Self { db })
     }
     pub fn write(&mut self, timestamp: i64, rows: &[UsageRow]) -> Result<()> {
@@ -68,7 +107,7 @@ impl Store {
             write_rows(&tx, *timestamp, rows)?;
         }
         {
-            let mut stmt=tx.prepare_cached("INSERT INTO adapter_samples VALUES(?1,?2,?3,?4,?5) ON CONFLICT(timestamp,adapter_id) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,elapsed=elapsed+excluded.elapsed")?;
+            let mut stmt=tx.prepare_cached("INSERT INTO adapter_samples(timestamp,adapter_id,down,up,elapsed,wifi_network) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(timestamp,adapter_id,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,elapsed=elapsed+excluded.elapsed")?;
             for sample in samples {
                 for (id, (down, up)) in &sample.adapters {
                     stmt.execute(params![
@@ -76,7 +115,12 @@ impl Store {
                         id,
                         *down,
                         *up,
-                        sample.interval.max(0.001)
+                        sample.interval.max(0.001),
+                        sample
+                            .wifi_networks
+                            .get(id)
+                            .map(String::as_str)
+                            .unwrap_or("")
                     ])?;
                 }
             }
@@ -84,24 +128,26 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Checkpoint whatever is available without waiting for readers. Committed
+    /// transactions remain durable in the WAL if an active reader pins frames;
+    /// SQLite can checkpoint the remainder after that reader releases its snapshot.
     pub fn checkpoint(&self) -> Result<()> {
-        let (busy, _, _): (i64, i64, i64) =
-            self.db
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?;
-        anyhow::ensure!(
-            busy == 0,
-            "History is committed, but another reader prevented the final checkpoint"
-        );
+        self.db
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
         Ok(())
     }
     pub fn history(&self, filter: &Filter, now: i64) -> Result<History> {
         // Filter at the minute boundary consistently with the stored precision.
         let start = (now - filter.seconds) / 60 * 60;
-        let mut stmt = self.db.prepare_cached("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,SUM(down),SUM(up),traffic_type
+        let mut stmt = self.db.prepare_cached("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,SUM(down),SUM(up),traffic_type,wifi_network
             FROM traffic WHERE source=?1 AND minute>=?2 AND minute<=?3
-            GROUP BY minute,adapter_id,app,pid,remote,protocol,scope,traffic_type ORDER BY minute")?;
+            GROUP BY minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network ORDER BY minute")?;
         let mut result = History {
             window_start: now - filter.seconds,
             window_end: now,
@@ -109,7 +155,7 @@ impl Store {
         };
         let mut points = std::collections::BTreeMap::<i64, (u64, u64)>::new();
         let mut totals = std::collections::BTreeMap::<
-            (String, String, u32, String, String, String, String),
+            (String, String, u32, String, String, String, String, String),
             UsageRow,
         >::new();
         let iter = stmt.query_map(params![filter.source.key(), start, now], |r| {
@@ -128,6 +174,7 @@ impl Store {
                     down: r.get(10)?,
                     up: r.get(11)?,
                     traffic_type: r.get(12)?,
+                    wifi_network: r.get(13)?,
                 },
             ))
         })?;
@@ -149,6 +196,7 @@ impl Store {
                 row.protocol.clone(),
                 row.scope.clone(),
                 row.traffic_type.clone(),
+                row.wifi_network.clone(),
             );
             let item = totals.entry(key).or_insert_with(|| UsageRow {
                 down: 0,
@@ -161,8 +209,12 @@ impl Store {
         let mut series: Vec<(i64, u64, u64, f64, i64)> = Vec::new();
         let mut raw_minutes = std::collections::HashSet::new();
         if filter.source == crate::model::Source::Adapter {
-            let mut raw=self.db.prepare_cached("SELECT timestamp,adapter_id,down,up,elapsed FROM adapter_samples WHERE timestamp>=?1 AND timestamp<=?2 ORDER BY timestamp")?;
-            let mut samples = std::collections::BTreeMap::<i64, (u64, u64, f64)>::new();
+            let mut raw = self.db.prepare_cached("SELECT timestamp,adapter_id,down,up,elapsed,wifi_network FROM adapter_samples WHERE timestamp>=?1 AND timestamp<=?2 ORDER BY timestamp")?;
+            // A single adapter may change networks within one second. Its
+            // elapsed intervals must be added, but elapsed time across separate
+            // adapters in the same second must not be counted twice.
+            let mut by_adapter =
+                std::collections::BTreeMap::<(i64, String), (u64, u64, f64)>::new();
             for row in raw.query_map(params![now - filter.seconds, now], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -170,17 +222,30 @@ impl Store {
                     r.get::<_, u64>(2)?,
                     r.get::<_, u64>(3)?,
                     r.get::<_, f64>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             })? {
-                let (t, id, down, up, elapsed) = row?;
-                if !filter.adapters.is_empty() && !filter.adapters.contains(&id) {
+                let (t, id, down, up, elapsed, wifi) = row?;
+                if (!filter.adapters.is_empty() && !filter.adapters.contains(&id))
+                    || filter
+                        .wifi_network
+                        .as_ref()
+                        .is_some_and(|selected| selected != &wifi)
+                {
                     continue;
                 }
-                let entry = samples.entry(t).or_default();
-                entry.0 += down;
-                entry.1 += up;
-                entry.2 = entry.2.max(elapsed);
+                let entry = by_adapter.entry((t, id)).or_default();
+                entry.0 = entry.0.saturating_add(down);
+                entry.1 = entry.1.saturating_add(up);
+                entry.2 += elapsed;
                 raw_minutes.insert(t / 60 * 60);
+            }
+            let mut samples = std::collections::BTreeMap::<i64, (u64, u64, f64)>::new();
+            for ((t, _), (down, up, elapsed)) in by_adapter {
+                let entry = samples.entry(t).or_default();
+                entry.0 = entry.0.saturating_add(down);
+                entry.1 = entry.1.saturating_add(up);
+                entry.2 = entry.2.max(elapsed);
             }
             series.extend(
                 samples
@@ -202,7 +267,7 @@ impl Store {
     }
     pub fn export(&self, path: &Path, filter: &Filter, now: i64) -> Result<usize> {
         let start = (now - filter.seconds) / 60 * 60;
-        let mut stmt = self.db.prepare("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type FROM traffic WHERE source=?1 AND minute>=?2 AND minute<=?3 ORDER BY minute")?;
+        let mut stmt = self.db.prepare("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network FROM traffic WHERE source=?1 AND minute>=?2 AND minute<=?3 ORDER BY minute")?;
         // create_new prevents accidental overwrite or a partial replacement of an existing export.
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -224,7 +289,13 @@ impl Store {
             "download_bytes",
             "upload_bytes",
             "traffic_type",
+            "wifi_network",
         ])?;
+        let wifi_names: std::collections::HashMap<String, String> = self
+            .known_wifi_networks()?
+            .into_iter()
+            .map(|n| (n.id, n.name))
+            .collect();
         let mut count = 0;
         let rows = stmt.query_map(params![filter.source.key(), start, now], |r| {
             Ok((
@@ -242,6 +313,7 @@ impl Store {
                     down: r.get(10)?,
                     up: r.get(11)?,
                     traffic_type: r.get(12)?,
+                    wifi_network: r.get(13)?,
                 },
             ))
         })?;
@@ -267,6 +339,14 @@ impl Store {
                 r.down.to_string(),
                 r.up.to_string(),
                 csv_safe(&r.traffic_type),
+                csv_safe(if r.wifi_network == WIFI_UNKNOWN {
+                    "Unknown Wi-Fi"
+                } else {
+                    wifi_names
+                        .get(&r.wifi_network)
+                        .map(String::as_str)
+                        .unwrap_or(r.wifi_network.as_str())
+                }),
             ])?;
             count += 1;
         }
@@ -298,12 +378,36 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?;
         Ok(ids)
     }
+    pub fn remember_wifi_networks(&mut self, networks: &[WifiNetwork]) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for network in networks {
+            if !network.id.is_empty() && network.id != WIFI_UNKNOWN {
+                tx.execute("INSERT INTO wifi_networks(id,name) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET name=excluded.name", params![network.id, network.name])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn known_wifi_networks(&self) -> Result<Vec<WifiNetwork>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT id,name FROM wifi_networks ORDER BY name COLLATE NOCASE,id")?;
+        let networks = stmt
+            .query_map([], |r| {
+                Ok(WifiNetwork {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(networks)
+    }
     pub fn scope_totals(&self, filter: &Filter, now: i64) -> Result<ScopeTotals> {
         Ok(self.transport_summary(filter, now)?.classified)
     }
     /// Shared period/adapter rollup for the Overall Traffic footer, independent of app-page search.
     pub fn transport_summary(&self, filter: &Filter, now: i64) -> Result<TransportSummary> {
-        let mut stmt=self.db.prepare_cached("SELECT adapter_id,app,scope,SUM(down),SUM(up) FROM traffic WHERE source='transport' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id,app,scope")?;
+        let mut stmt=self.db.prepare_cached("SELECT adapter_id,app,scope,SUM(down),SUM(up),wifi_network FROM traffic WHERE source='transport' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id,app,scope,wifi_network")?;
         let rows = stmt.query_map(params![(now - filter.seconds) / 60 * 60, now], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -311,13 +415,19 @@ impl Store {
                 r.get::<_, String>(2)?,
                 r.get::<_, u64>(3)?,
                 r.get::<_, u64>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?;
         let mut classified = ScopeTotals::default();
         let mut apps = std::collections::BTreeMap::<String, AppUsage>::new();
         for row in rows {
-            let (adapter, app, scope, down, up) = row?;
-            if !filter.adapters.is_empty() && !filter.adapters.contains(&adapter) {
+            let (adapter, app, scope, down, up, wifi) = row?;
+            if (!filter.adapters.is_empty() && !filter.adapters.contains(&adapter))
+                || filter
+                    .wifi_network
+                    .as_ref()
+                    .is_some_and(|selected| selected != &wifi)
+            {
                 continue;
             }
             let bytes = down.saturating_add(up);
@@ -359,7 +469,7 @@ impl Store {
     }
 }
 fn write_rows(tx: &rusqlite::Transaction<'_>, timestamp: i64, rows: &[UsageRow]) -> Result<()> {
-    let mut stmt=tx.prepare_cached("INSERT INTO traffic VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(minute,source,adapter_id,app,pid,remote,protocol,scope,traffic_type) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=excluded.country,adapter=excluded.adapter")?;
+    let mut stmt=tx.prepare_cached("INSERT INTO traffic(minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(minute,source,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=excluded.country,adapter=excluded.adapter")?;
     for r in rows {
         stmt.execute(params![
             timestamp / 60 * 60,
@@ -374,7 +484,8 @@ fn write_rows(tx: &rusqlite::Transaction<'_>, timestamp: i64, rows: &[UsageRow])
             r.scope,
             r.down,
             r.up,
-            r.traffic_type
+            r.traffic_type,
+            r.wifi_network
         ])?;
     }
     Ok(())
@@ -501,6 +612,7 @@ mod file_tests {
             source: "transport".into(),
             adapter_id: "eth".into(),
             adapter: "Ethernet, office".into(),
+            wifi_network: String::new(),
             app: "=unsafe.exe".into(),
             traffic_type: "DNS".into(),
             pid: 42,
@@ -661,6 +773,7 @@ mod durable_chart_tests {
                         timestamp: t,
                         interval: 1.0,
                         adapters: HashMap::from([("eth".into(), (100, 40))]),
+                        wifi_networks: HashMap::new(),
                     }],
                 )?;
             }
@@ -679,6 +792,7 @@ mod durable_chart_tests {
                     timestamp: 6299,
                     interval: 0.25,
                     adapters: HashMap::from([("eth".into(), (25, 10))]),
+                    wifi_networks: HashMap::new(),
                 }],
             )?;
             store.checkpoint()?;
@@ -705,6 +819,78 @@ mod durable_chart_tests {
         Ok(())
     }
     #[test]
+    fn checkpoint_does_not_wait_for_a_reader_and_commits_survive_reopen() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history.db");
+        let mut store = Store::open(&path)?;
+        let row = UsageRow {
+            source: "adapter".into(),
+            adapter_id: "eth".into(),
+            down: 40,
+            up: 10,
+            ..Default::default()
+        };
+        store.write(600, std::slice::from_ref(&row))?;
+        store.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+
+        let reader = Connection::open(&path)?;
+        reader.execute_batch("BEGIN")?;
+        assert_eq!(
+            reader.query_row("SELECT SUM(down) FROM traffic", [], |r| r.get::<_, u64>(0))?,
+            40
+        );
+        store.write_capture(
+            &BTreeMap::from([(
+                660,
+                vec![UsageRow {
+                    down: 100,
+                    up: 20,
+                    ..row
+                }],
+            )]),
+            &[LiveTick {
+                timestamp: 660,
+                interval: 0.5,
+                adapters: HashMap::from([("eth".into(), (100, 20))]),
+                wifi_networks: HashMap::new(),
+            }],
+        )?;
+        let started = std::time::Instant::now();
+        store.checkpoint()?;
+        drop(store);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "Checkpoint or writer close blocked on an active reader"
+        );
+
+        // The old reader keeps its snapshot while a fresh connection sees the
+        // committed rows and adapter sample even though WAL frames are pinned.
+        assert_eq!(
+            reader.query_row("SELECT SUM(down) FROM traffic", [], |r| r.get::<_, u64>(0))?,
+            40
+        );
+        let reopened = Store::open(&path)?;
+        assert_eq!(
+            reopened
+                .db
+                .query_row("SELECT SUM(down) FROM traffic", [], |r| r.get::<_, u64>(0))?,
+            140
+        );
+        assert_eq!(
+            reopened
+                .db
+                .query_row("SELECT SUM(down) FROM adapter_samples", [], |r| r
+                    .get::<_, u64>(0))?,
+            100
+        );
+        drop(reopened);
+        reader.execute_batch("ROLLBACK")?;
+        drop(reader);
+        let reopened = Store::open(&path)?;
+        assert_eq!(reopened.history(&Filter::default(), 700)?.down, 140);
+        Ok(())
+    }
+    #[test]
     fn unknown_intervals_are_gaps_but_measured_zero_is_retained() -> Result<()> {
         let mut store = Store::open(Path::new(":memory:"))?;
         for t in [6000, 6001, 6010, 6011] {
@@ -714,6 +900,7 @@ mod durable_chart_tests {
                     timestamp: t,
                     interval: 1.0,
                     adapters: HashMap::from([("a".into(), (0, 0))]),
+                    wifi_networks: HashMap::new(),
                 }],
             )?;
         }
@@ -746,6 +933,7 @@ mod durable_chart_tests {
             timestamp: 6000,
             interval: 1.0,
             adapters: HashMap::from([("a".into(), (100, 0))]),
+            wifi_networks: HashMap::new(),
         }];
         assert!(store.write_capture(&rows, &samples).is_err());
         assert_eq!(store.history(&Filter::default(), 6010)?.down, 0);
@@ -819,7 +1007,7 @@ mod service_history_tests {
             store
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-            4
+            5
         );
         assert_eq!(
             store
@@ -844,6 +1032,172 @@ mod service_history_tests {
             .records()
             .collect::<std::result::Result<Vec<_>, _>>()?;
         assert!(rows.iter().any(|r| r.get(12) == Some("HTTPS / TLS")));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wifi_history_tests {
+    use super::*;
+    use crate::model::Source;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    #[test]
+    fn v4_upgrade_preserves_legacy_rows_and_separates_networks_through_reopen() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("wifi-migration.db");
+        {
+            let old = Connection::open(&path)?;
+            old.execute_batch("CREATE TABLE traffic(minute INTEGER NOT NULL,source TEXT NOT NULL,adapter_id TEXT NOT NULL,adapter TEXT NOT NULL,app TEXT NOT NULL,pid INTEGER NOT NULL,remote TEXT NOT NULL,country TEXT NOT NULL,protocol TEXT NOT NULL,scope TEXT NOT NULL,down INTEGER NOT NULL,up INTEGER NOT NULL,traffic_type TEXT NOT NULL DEFAULT '',PRIMARY KEY(minute,source,adapter_id,app,pid,remote,protocol,scope,traffic_type));
+                CREATE INDEX traffic_time_source ON traffic(source,minute);
+                CREATE TABLE adapter_samples(timestamp INTEGER NOT NULL,adapter_id TEXT NOT NULL,down INTEGER NOT NULL,up INTEGER NOT NULL,elapsed REAL NOT NULL,PRIMARY KEY(timestamp,adapter_id));
+                INSERT INTO traffic VALUES(600,'adapter','wifi','Wi-Fi','',0,'','','','Unknown',42,2,'');
+                INSERT INTO adapter_samples VALUES(600,'wifi',42,2,1.0);
+                PRAGMA user_version=4;")?;
+        }
+        let base = UsageRow {
+            source: "adapter".into(),
+            adapter_id: "wifi".into(),
+            adapter: "Wi-Fi".into(),
+            scope: "Unknown".into(),
+            ..Default::default()
+        };
+        {
+            let mut store = Store::open(&path)?;
+            assert_eq!(store.history(&Filter::default(), 660)?.down, 42);
+            assert!(
+                store
+                    .history(&Filter::default(), 660)?
+                    .rows
+                    .iter()
+                    .all(|r| r.wifi_network.is_empty())
+            );
+            store.remember_wifi_networks(&[
+                WifiNetwork {
+                    id: "ssid:home".into(),
+                    name: "=Home".into(),
+                },
+                WifiNetwork {
+                    id: "ssid:office".into(),
+                    name: "Office".into(),
+                },
+            ])?;
+            for (wifi, down, up, elapsed) in [
+                ("ssid:home", 100, 10, 0.25),
+                ("ssid:office", 200, 20, 0.5),
+                (WIFI_UNKNOWN, 30, 3, 0.25),
+            ] {
+                let row = UsageRow {
+                    wifi_network: wifi.into(),
+                    down,
+                    up,
+                    ..base.clone()
+                };
+                let app = UsageRow {
+                    source: "transport".into(),
+                    app: "browser.exe".into(),
+                    pid: 7,
+                    remote: "1.1.1.1".into(),
+                    protocol: "TCP".into(),
+                    scope: "WAN".into(),
+                    ..row.clone()
+                };
+                store.write_capture(
+                    &BTreeMap::from([(601, vec![row, app])]),
+                    &[LiveTick {
+                        timestamp: 601,
+                        interval: elapsed,
+                        adapters: HashMap::from([("wifi".into(), (down, up))]),
+                        wifi_networks: HashMap::from([("wifi".into(), wifi.into())]),
+                    }],
+                )?;
+            }
+            store.checkpoint()?;
+        }
+        let store = Store::open(&path)?;
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            5
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))?,
+            "ok"
+        );
+        let all = Filter {
+            seconds: 300,
+            adapters: HashSet::from(["wifi".into()]),
+            ..Default::default()
+        };
+        let history = store.history(&all, 660)?;
+        assert_eq!((history.down, history.up), (372, 35));
+        assert_eq!(history.rows.len(), 4);
+        assert_eq!(
+            history
+                .points
+                .iter()
+                .find(|p| p.timestamp == 601)
+                .map(|p| (p.down, p.up)),
+            Some((330, 33))
+        );
+        for (id, down, up, rate) in [
+            ("ssid:home", 100, 10, 400),
+            ("ssid:office", 200, 20, 400),
+            (WIFI_UNKNOWN, 30, 3, 120),
+        ] {
+            let filter = Filter {
+                wifi_network: Some(id.into()),
+                ..all.clone()
+            };
+            let history = store.history(&filter, 660)?;
+            assert_eq!((history.down, history.up), (down, up));
+            assert_eq!(history.rows.len(), 1);
+            assert_eq!(
+                history
+                    .points
+                    .iter()
+                    .find(|p| p.timestamp == 601)
+                    .map(|p| p.down),
+                Some(rate)
+            );
+            let app_filter = Filter {
+                source: Source::Transport,
+                ..filter
+            };
+            let apps = store.history(&app_filter, 660)?;
+            assert_eq!((apps.down, apps.up), (down, up));
+            let summary = store.transport_summary(&app_filter, 660)?;
+            assert_eq!(summary.classified.wan, down + up);
+            assert_eq!(
+                (summary.top_apps[0].down, summary.top_apps[0].up),
+                (down, up)
+            );
+        }
+        assert_eq!(store.known_wifi_networks()?.len(), 2);
+        let csv = dir.path().join("home.csv");
+        let filter = Filter {
+            source: Source::Transport,
+            wifi_network: Some("ssid:home".into()),
+            ..all
+        };
+        assert_eq!(store.export(&csv, &filter, 660)?, 1);
+        let mut reader = csv::Reader::from_path(csv)?;
+        assert_eq!(reader.headers()?.get(13), Some("wifi_network"));
+        let row = reader.records().next().unwrap()?;
+        assert_eq!(row.get(13), Some("'=Home"));
+        assert_eq!(row.get(10), Some("100"));
+        Ok(())
+    }
+
+    #[test]
+    fn old_preferences_default_to_all_wifi_networks() -> Result<()> {
+        let filter: Filter = serde_json::from_str(
+            r#"{"source":"Adapter","scope":"All","adapters":[],"seconds":300,"search":"","apps":[]}"#,
+        )?;
+        assert!(filter.wifi_network.is_none());
         Ok(())
     }
 }

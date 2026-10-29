@@ -40,6 +40,23 @@ pub struct EtwCapture {
     pub stats: Arc<CaptureStats>,
     name: Vec<u16>,
 }
+// TCP kernel events report socket endpoints, not packet direction: saddr/sport
+// are local and daddr/dport are remote for both Send and Recv. UDP receive
+// events use packet direction, so their endpoints are reversed on receive.
+fn endpoints(
+    protocol: &str,
+    upload: bool,
+    src: IpAddr,
+    dst: IpAddr,
+    sport: u16,
+    dport: u16,
+) -> (IpAddr, IpAddr, u16, u16) {
+    if protocol == "TCP" || upload {
+        (src, dst, sport, dport)
+    } else {
+        (dst, src, dport, sport)
+    }
+}
 fn callback(
     tx: SyncSender<TrafficEvent>,
     stats: Arc<CaptureStats>,
@@ -73,13 +90,15 @@ fn callback(
             };
             let sport = port("sport");
             let dport = port("dport");
+            let (local, remote, local_port, remote_port) =
+                endpoints(protocol, upload, src, dst, sport, dport);
             Some(TrafficEvent {
-                local_port: if upload { sport } else { dport },
-                remote_port: if upload { dport } else { sport },
+                local_port,
+                remote_port,
                 timestamp: filetime_to_unix(record.raw_timestamp()),
                 pid,
-                local: if upload { src } else { dst },
-                remote: if upload { dst } else { src },
+                local,
+                remote,
                 protocol,
                 down: if upload { 0 } else { size },
                 up: if upload { size } else { 0 },
@@ -192,6 +211,30 @@ impl Drop for EtwCapture {
 #[cfg(test)]
 mod time_tests {
     use super::*;
+    #[test]
+    fn tcp_send_and_receive_keep_socket_addresses_and_ports() {
+        let local: IpAddr = "192.168.1.3".parse().unwrap();
+        let remote: IpAddr = "8.8.8.8".parse().unwrap();
+        for upload in [true, false] {
+            assert_eq!(
+                endpoints("TCP", upload, local, remote, 54321, 443),
+                (local, remote, 54321, 443),
+            );
+        }
+    }
+    #[test]
+    fn udp_receive_still_uses_packet_direction() {
+        let local: IpAddr = "192.168.1.3".parse().unwrap();
+        let remote: IpAddr = "8.8.8.8".parse().unwrap();
+        assert_eq!(
+            endpoints("UDP", true, local, remote, 54321, 53),
+            (local, remote, 54321, 53)
+        );
+        assert_eq!(
+            endpoints("UDP", false, remote, local, 53, 54321),
+            (local, remote, 54321, 53)
+        );
+    }
     #[test]
     fn preserves_low_bits_of_windows_filetime_and_utc_epoch() {
         assert_eq!(filetime_to_unix(133_444_736_009_876_543), 1_700_000_000);

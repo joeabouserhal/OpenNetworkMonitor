@@ -9,6 +9,7 @@ The desktop executable has a single collector thread and an egui/eframe UI threa
 - `worker.rs`: sampling, endpoint aggregation, offline geolocation, SQLite writes, filter queries, export and retention. Rendering can stop while collection continues.
 - `store.rs`: SQLite WAL mode, transactional minute upserts, gap-aware chart series, filtered export with formula escaping. Failed writes are retained for retry up to a bounded row limit, after which a persistent warning reports that history stopped.
 - `graph.rs`: custom egui plot with direction toggles, log scale, time labels, hover and drag zoom.
+- `icons.rs`: bounded, background Windows executable icon extraction and cached egui textures for visible app rows. Missing icons use a fallback and can be retried.
 - `tray.rs`: native tray icon/menu, direct Exit and UI wake-up.
 - `app.rs`: screens, themes, view state and persisted preferences.
 - `main.rs`: startup, local data path, diagnostics and generated-traffic verification.
@@ -18,6 +19,8 @@ The desktop executable has a single collector thread and an egui/eframe UI threa
 `source=adapter` means interface bytes; `source=transport` means observed TCP/UDP event bytes. Each database key includes the source. Queries choose exactly one source. Never add source totals, label transport bytes as link-layer bytes, or infer a country's location without a successful local database lookup.
 
 Transport records include an adapter identity only when the event's local IP matches exactly one current adapter. No fallback attributes arbitrary events to the default adapter. Adapter selection affects app records via this inference and must retain an Unassigned option. Interface identity uses a GUID rather than the volatile interface index.
+
+TCP ETW send and receive events identify the local socket with saddr/sport and the remote peer with daddr/dport. UDP receive events use packet-direction endpoint order and are decoded separately. Earlier TCP receive records saved the local address in place of the remote address; those historical destinations and their derived adapter, scope and service labels cannot be reconstructed reliably.
 
 ETW uses payload PID rather than event-header PID. Only data send/receive opcodes 10/11 (IPv4) and 26/27 (IPv6) are counted. UDP has its own provider GUID even though the kernel enable flag is shared with TCP. Event timestamps preserve the original capture minute rather than the callback-delivery minute.
 
@@ -45,7 +48,7 @@ Schema version 3 adds adapter_samples, keyed by timestamp and adapter GUID, with
 
 History includes explicit requested window_start/window_end and Point.observed. The chart never derives its time domain from the first or last observed point. Raw samples provide recent rates and minute aggregates cover older legacy history; missing intervals insert gap markers. No zero-fill or independent Live/History mode remains. The UI lays out the adapter view directly rather than inside a scroll area and allocates the plot from the remaining height after reserving the compact summary row.
 
-The ETW consumer is owned rather than detached. Shutdown stops only the app-owned named session, lets ProcessTrace finish delivering buffered events, joins the consumer, drains the event queue, writes the final sample and checkpoints. FULL synchronization and the current SQLite engine protect committed data; integrity_check failures are surfaced instead of looking like empty usage.
+The ETW consumer is owned rather than detached. Shutdown stops only the app-owned named session, lets ProcessTrace finish delivering buffered events, joins the consumer, drains the event queue, writes the final sample and attempts a nonblocking checkpoint. A reader can keep committed frames in the WAL for a later checkpoint; unnecessary UI history refreshes and metadata lookups are skipped during exit. FULL synchronization and the current SQLite engine protect committed data; integrity_check failures are surfaced instead of looking like empty usage.
 
 ## v0.2.2 application lists
 
@@ -83,6 +86,12 @@ The default viewport is 1440x820 points. A persisted wide_summary_initialized pr
 
 ## v0.3.3 dense app traffic
 
-App traffic has one bounded, non-wrapping filter bar: search, period, adapters and network scope. Each dropdown owns a stable ID. The adapter popup uses CloseOnClickOutside to support several checkbox changes before dismissal; the same adapter-choice function serves the Overall Traffic adapter chooser. Filter changes refresh history once, retaining an app selection while replacement data is pending.
+App traffic has one bounded, non-wrapping filter bar: period, adapters, network scope and search. Each dropdown owns a stable ID. The adapter popup uses CloseOnClickOutside to support several checkbox changes before dismissal; the same adapter-choice function serves the Overall Traffic adapter chooser. Filter changes refresh history once, retaining an app selection while replacement data is pending.
 
-The Overview subtitle and standing selection hint are removed. Clear selection moves to All apps in the Apps heading, with a fixed heading height shared by all columns. App/host/type rows shrink from 78 to 56 points. Primary labels/totals stay prominent; directories and other subtitles are 11.5 points, as are Down/Up details. All lists continue to virtualize and scroll independently. Paths and full values remain in hover details. Overall Traffic retains its existing quick period controls.
+The Overview subtitle and standing selection hint are removed. Clear selection moves to All apps in the Apps heading, with a fixed heading height shared by all columns. App/host/type rows shrink from 78 to 56 points. Primary labels/totals stay prominent; directories and other subtitles are 11.5 points, as are Down/Up details. All lists continue to virtualize and scroll independently. Paths and full values remain in hover details. Both Overview views share a compact filter bar, including period and multi-adapter dropdowns.
+
+## Wi-Fi connection history
+
+Windows connection profiles provide the current Wi-Fi SSID and adapter GUID on the collector thread. SSIDs use stable IDs derived from their exact UTF-16 values; displayed labels remove control characters. Schema version 5 atomically adds the Wi-Fi ID to both traffic and adapter-sample keys and stores a local name catalog. Existing rows keep an empty ID because their network cannot be reconstructed. The UI intersects the selected Wi-Fi connection with the existing adapter and period filters.
+
+The collector observes each connection about once a second. Adapter deltas spanning an observed switch are marked unidentified. Because ETW timestamps have one-second precision, a bounded queue waits for a later observation before attributing Wi-Fi events to a confirmed stable interval; unresolved events are retained as unidentified on timeout, queue pressure, or exit. Delayed events can use recently confirmed intervals, and association still requires a unique local-address match to an adapter. Switches entirely between observations cannot be detected.

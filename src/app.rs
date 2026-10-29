@@ -1,5 +1,6 @@
 use crate::{
     graph::{Graph, destination_breakdown, download_color, format_number, upload_color},
+    icons::IconCache,
     model::*,
     store::Store,
     traffic::{Breakdown, RankedUsage, breakdown, executable_directory, executable_filename},
@@ -198,6 +199,7 @@ struct FrozenChart {
 }
 pub struct MonitorApp {
     worker: Worker,
+    icons: IconCache,
     tray: Option<Tray>,
     data: Shared,
     settings: Settings,
@@ -214,7 +216,6 @@ pub struct MonitorApp {
     app_search: String,
     data_dir: PathBuf,
     view_warning: String,
-    show_filters: bool,
     show_graph_options: bool,
     app_cache: Arc<Vec<AppTotal>>,
     app_cache_key: Option<(u64, u64, u64, String)>,
@@ -250,6 +251,7 @@ impl MonitorApp {
         };
         Ok(Self {
             worker,
+            icons: IconCache::new(),
             tray,
             data: Shared::default(),
             settings,
@@ -266,7 +268,6 @@ impl MonitorApp {
             app_search: String::new(),
             data_dir,
             view_warning,
-            show_filters: false,
             show_graph_options: false,
             app_cache: Arc::new(Vec::new()),
             app_cache_key: None,
@@ -294,42 +295,7 @@ impl MonitorApp {
         if self.settings.filter.source != source {
             self.settings.filter.source = source;
             self.selected_app = None;
-            self.show_filters = false;
             self.update_filter();
-        }
-    }
-    fn toolbar(&mut self, ui: &mut egui::Ui, apps: bool) {
-        if apps {
-            self.app_toolbar(ui);
-            return;
-        }
-        let before = self.settings.filter.seconds;
-        surface(ui).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Period").size(13.5).weak());
-                for (seconds, label) in PERIODS {
-                    ui.selectable_value(&mut self.settings.filter.seconds, seconds, label);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let selection = self.adapter_selection_label();
-                    if ui.button(format!("Adapters · {selection}")).clicked() {
-                        self.show_filters = !self.show_filters;
-                    }
-                });
-            });
-        });
-        if self.settings.filter.seconds != before {
-            self.update_filter();
-        }
-        ui.add_space(4.0);
-    }
-    fn adapter_selection_label(&self) -> String {
-        if self.settings.filter.adapters.is_empty() {
-            "All".into()
-        } else if self.settings.filter.adapters.contains("__none__") {
-            "None".into()
-        } else {
-            format!("{} selected", self.settings.filter.adapters.len())
         }
     }
     fn adapter_choices(&mut self, ui: &mut egui::Ui) -> bool {
@@ -342,47 +308,138 @@ impl MonitorApp {
             changed = true;
         }
         ui.separator();
-        for adapter in &self.data.snapshot.adapters {
-            let mut checked = self.settings.filter.adapters.is_empty()
-                || self.settings.filter.adapters.contains(&adapter.id);
-            if ui
-                .checkbox(
-                    &mut checked,
-                    format!(
-                        "{}{}",
-                        adapter.name,
-                        if adapter.up { "" } else { " · disconnected" }
-                    ),
-                )
-                .changed()
-            {
-                toggle_adapter(
-                    &mut self.settings.filter.adapters,
-                    &self.data.snapshot.adapters,
-                    &adapter.id,
-                    checked,
-                    self.settings.filter.source == Source::Transport,
-                );
-                changed = true;
-            }
+        egui::ScrollArea::vertical()
+            .id_salt("adapter-choices")
+            .max_height(120.0)
+            .auto_shrink([true, true])
+            .show(ui, |ui| {
+                for adapter in &self.data.snapshot.adapters {
+                    let mut checked = self.settings.filter.adapters.is_empty()
+                        || self.settings.filter.adapters.contains(&adapter.id);
+                    if ui
+                        .checkbox(
+                            &mut checked,
+                            format!(
+                                "{}{}",
+                                adapter.name,
+                                if adapter.up { "" } else { " · disconnected" }
+                            ),
+                        )
+                        .changed()
+                    {
+                        toggle_adapter(
+                            &mut self.settings.filter.adapters,
+                            &self.data.snapshot.adapters,
+                            &adapter.id,
+                            checked,
+                            self.settings.filter.source == Source::Transport,
+                        );
+                        changed = true;
+                    }
+                }
+                if self.settings.filter.source == Source::Transport {
+                    let mut checked = self.settings.filter.adapters.is_empty()
+                        || self.settings.filter.adapters.contains("unassigned");
+                    if ui.checkbox(&mut checked, "Unassigned traffic").changed() {
+                        toggle_adapter(
+                            &mut self.settings.filter.adapters,
+                            &self.data.snapshot.adapters,
+                            "unassigned",
+                            checked,
+                            true,
+                        );
+                        changed = true;
+                    }
+                }
+            });
+        ui.separator();
+        ui.label(RichText::new("Wi-Fi connections").strong())
+            .on_hover_text("A specific connection shows only its Wi-Fi traffic within the selected adapters. Older and unidentifiable traffic cannot be assigned to a named connection.");
+        if ui
+            .selectable_label(
+                self.settings.filter.wifi_network.is_none(),
+                "All connections",
+            )
+            .clicked()
+        {
+            self.settings.filter.wifi_network = None;
+            changed = true;
         }
-        if self.settings.filter.source == Source::Transport {
-            let mut checked = self.settings.filter.adapters.is_empty()
-                || self.settings.filter.adapters.contains("unassigned");
-            if ui.checkbox(&mut checked, "Unassigned traffic").changed() {
-                toggle_adapter(
-                    &mut self.settings.filter.adapters,
-                    &self.data.snapshot.adapters,
-                    "unassigned",
-                    checked,
-                    true,
-                );
-                changed = true;
-            }
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("wifi-connection-choices")
+            .max_height(120.0)
+            .auto_shrink([true, true])
+            .show(ui, |ui| {
+                for network in &self.data.snapshot.wifi_networks {
+                    ui.push_id(&network.id, |ui| {
+                        let name = wifi_display_name(&network.name);
+                        if ui
+                            .selectable_label(
+                                self.settings.filter.wifi_network.as_deref()
+                                    == Some(network.id.as_str()),
+                                name,
+                            )
+                            .clicked()
+                        {
+                            self.settings.filter.wifi_network = Some(network.id.clone());
+                            changed = true;
+                        }
+                    });
+                }
+                if ui
+                    .selectable_label(
+                        self.settings.filter.wifi_network.as_deref() == Some(WIFI_UNKNOWN),
+                        "Unidentified Wi-Fi",
+                    )
+                    .clicked()
+                {
+                    self.settings.filter.wifi_network = Some(WIFI_UNKNOWN.to_owned());
+                    changed = true;
+                }
+            });
         changed
     }
-    fn app_toolbar(&mut self, ui: &mut egui::Ui) {
+    fn adapter_filter_caption(&self) -> (String, String) {
+        let adapters = if self.settings.filter.adapters.is_empty() {
+            "All adapters".to_owned()
+        } else if self.settings.filter.adapters.contains("__none__") {
+            "No adapters".to_owned()
+        } else {
+            format!("{} adapters selected", self.settings.filter.adapters.len())
+        };
+        if let Some(selected) = &self.settings.filter.wifi_network {
+            let name = if selected == WIFI_UNKNOWN {
+                "Unidentified Wi-Fi".to_owned()
+            } else {
+                self.data
+                    .snapshot
+                    .wifi_networks
+                    .iter()
+                    .find(|network| network.id == *selected)
+                    .map(|network| wifi_display_name(&network.name))
+                    .unwrap_or_else(|| "Unavailable network".to_owned())
+            };
+            (
+                format!("Wi-Fi: {name}"),
+                format!(
+                    "Wi-Fi: {name} · {adapters}. Only traffic on this connection within the selected adapters is shown."
+                ),
+            )
+        } else {
+            let label = if self.settings.filter.adapters.is_empty() {
+                "All".to_owned()
+            } else if self.settings.filter.adapters.contains("__none__") {
+                "None".to_owned()
+            } else {
+                self.settings.filter.adapters.len().to_string()
+            };
+            (
+                format!("Adapters: {label}"),
+                format!("{adapters} · All Wi-Fi connections"),
+            )
+        }
+    }
+    fn toolbar(&mut self, ui: &mut egui::Ui, apps: bool) {
         let before = (self.settings.filter.seconds, self.settings.filter.scope);
         let mut adapters_changed = false;
         surface(ui).inner_margin(10).show(ui, |ui| {
@@ -396,107 +453,97 @@ impl MonitorApp {
             ui.style_mut()
                 .text_styles
                 .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-            ui.horizontal(|ui| {
-                let widths = [126.0, 148.0, 144.0];
-                let search = (ui.available_width()
-                    - widths.iter().sum::<f32>()
-                    - 3.0 * ui.spacing().item_spacing.x)
-                    .floor()
-                    .max(120.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.app_search)
-                        .hint_text("Search apps or folders")
-                        .desired_width(search)
-                        .margin(egui::Margin::symmetric(8, 5)),
-                );
-                let label = PERIODS
-                    .iter()
-                    .find(|(seconds, _)| *seconds == self.settings.filter.seconds)
-                    .map_or("Custom", |(_, label)| *label);
-                filter_dropdown(
-                    ui,
-                    "app-period",
-                    widths[0],
-                    format!("Period: {label}"),
-                    false,
-                    |ui| {
-                        for (seconds, label) in [
-                            (300, "5 minutes"),
-                            (3600, "1 hour"),
-                            (86400, "24 hours"),
-                            (604800, "7 days"),
-                            (2592000, "30 days"),
-                        ] {
-                            ui.selectable_value(&mut self.settings.filter.seconds, seconds, label);
-                        }
-                    },
-                );
-                let label = if self.settings.filter.adapters.is_empty() {
-                    "All".into()
-                } else if self.settings.filter.adapters.contains("__none__") {
-                    "None".into()
-                } else {
-                    self.settings.filter.adapters.len().to_string()
-                };
-                filter_dropdown(
-                    ui,
-                    "app-adapters",
-                    widths[1],
-                    format!("Adapters: {label}"),
-                    true,
-                    |ui| {
-                        adapters_changed = self.adapter_choices(ui);
-                    },
-                );
-                let label = match self.settings.filter.scope {
-                    Scope::All => "All",
-                    Scope::Lan => "LAN",
-                    Scope::Wan => "WAN",
-                    Scope::Unknown => "Other",
-                };
-                filter_dropdown(
-                    ui,
-                    "app-networks",
-                    widths[2],
-                    format!("Networks: {label}"),
-                    false,
-                    |ui| {
-                        for (scope, label) in [
-                            (Scope::All, "All networks"),
-                            (Scope::Lan, "LAN"),
-                            (Scope::Wan, "WAN"),
-                            (Scope::Unknown, "Other"),
-                        ] {
-                            ui.selectable_value(&mut self.settings.filter.scope, scope, label);
-                        }
-                    },
-                );
-            });
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), 30.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let widths = [126.0, 148.0, 144.0];
+                    let label = PERIODS
+                        .iter()
+                        .find(|(seconds, _)| *seconds == self.settings.filter.seconds)
+                        .map_or("Custom", |(_, label)| *label);
+                    filter_dropdown(
+                        ui,
+                        if apps { "app-period" } else { "overall-period" },
+                        widths[0],
+                        format!("Period: {label}"),
+                        false,
+                        |ui| {
+                            for (seconds, label) in [
+                                (300, "5 minutes"),
+                                (3600, "1 hour"),
+                                (86400, "24 hours"),
+                                (604800, "7 days"),
+                                (2592000, "30 days"),
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.settings.filter.seconds,
+                                    seconds,
+                                    label,
+                                );
+                            }
+                        },
+                    );
+                    let (adapter_caption, adapter_tooltip) = self.adapter_filter_caption();
+                    filter_dropdown(
+                        ui,
+                        if apps {
+                            "app-adapters"
+                        } else {
+                            "overall-adapters"
+                        },
+                        widths[1],
+                        adapter_caption,
+                        true,
+                        |ui| {
+                            adapters_changed = self.adapter_choices(ui);
+                        },
+                    )
+                    .on_hover_text(adapter_tooltip);
+                    if apps {
+                        let label = match self.settings.filter.scope {
+                            Scope::All => "All",
+                            Scope::Lan => "LAN",
+                            Scope::Wan => "WAN",
+                            Scope::Unknown => "Other",
+                        };
+                        filter_dropdown(
+                            ui,
+                            "app-networks",
+                            widths[2],
+                            format!("Networks: {label}"),
+                            false,
+                            |ui| {
+                                for (scope, label) in [
+                                    (Scope::All, "All networks"),
+                                    (Scope::Lan, "LAN"),
+                                    (Scope::Wan, "WAN"),
+                                    (Scope::Unknown, "Other"),
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.settings.filter.scope,
+                                        scope,
+                                        label,
+                                    );
+                                }
+                            },
+                        );
+                        let search = ui.available_width().floor().max(120.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.app_search)
+                                .hint_text("Search apps or folders")
+                                .desired_width(search)
+                                .margin(egui::Margin::symmetric(8, 5)),
+                        );
+                    }
+                },
+            );
         });
         if adapters_changed || before != (self.settings.filter.seconds, self.settings.filter.scope)
         {
             self.update_filter();
         }
         ui.add_space(4.0);
-    }
-    fn filter_window(&mut self, ctx: &egui::Context) {
-        if !self.show_filters {
-            return;
-        }
-        let mut open = true;
-        let mut changed = false;
-        egui::Window::new("Choose adapters")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(420.0)
-            .show(ctx, |ui| {
-                changed = self.adapter_choices(ui);
-            });
-        self.show_filters = open;
-        if changed {
-            self.update_filter();
-        }
     }
     fn export(&mut self) {
         let name = format!(
@@ -789,7 +836,8 @@ impl MonitorApp {
             self.selected_app = None;
         }
         let data = self.traffic_breakdown(&totals);
-        let height = ui.available_height();
+        // Keep a compact period summary visible beneath all three lists.
+        let height = (ui.available_height() - 70.0).max(100.0);
         let mut visible_hosts = Vec::new();
         widgets::three_columns(ui, |cols| {
             for col in cols.iter_mut() {
@@ -815,6 +863,7 @@ impl MonitorApp {
                     .show_rows(ui, USAGE_ROW_HEIGHT, totals.len(), |ui, range| {
                         for t in &totals[range] {
                             let directory = executable_directory(&t.path);
+                            let icon = self.icons.texture(ui.ctx(), &t.path);
                             let response = usage_row(
                                 ui,
                                 &t.path,
@@ -822,6 +871,7 @@ impl MonitorApp {
                                 &directory,
                                 (t.down, t.up),
                                 Some(self.selected_app.as_deref() == Some(&t.path)),
+                                icon,
                             )
                             .on_hover_text(format!(
                                 "{}\n{}\nDownload now: {}\nUpload now: {}",
@@ -856,6 +906,33 @@ impl MonitorApp {
                 ranked_list(ui, "Traffic type", &data.types, "ranked-types", false);
             });
         });
+        ui.add_space(6.0);
+        surface(ui).inner_margin(10).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("All apps").size(13.0).weak());
+                ui.add_space(18.0);
+                ui.label(RichText::new("Downloaded").size(13.0).weak());
+                ui.label(
+                    RichText::new(compact_bytes(self.data.history.down))
+                        .size(16.0)
+                        .strong()
+                        .color(download_color(ui)),
+                );
+                ui.add_space(18.0);
+                ui.label(RichText::new("Uploaded").size(13.0).weak());
+                ui.label(
+                    RichText::new(compact_bytes(self.data.history.up))
+                        .size(16.0)
+                        .strong()
+                        .color(upload_color(ui)),
+                );
+                ui.add_space(20.0);
+                traffic_distribution_bar(ui, self.data.history.down, self.data.history.up);
+            });
+        }).response.on_hover_text(
+            "Total captured app traffic for the selected period, adapters, and network. Search and app selection do not change this total.",
+        );
         if !visible_hosts.is_empty()
             && self
                 .host_request
@@ -1322,7 +1399,6 @@ impl MonitorApp {
 impl MonitorApp {
     fn draw(&mut self, root: &mut egui::Ui) -> egui::Rect {
         let ctx = root.ctx().clone();
-        self.filter_window(&ctx);
         if self.show_graph_options {
             let mut open = true;
             egui::Window::new("Chart options")
@@ -1512,7 +1588,7 @@ impl eframe::App for MonitorApp {
         let exiting = self
             .tray
             .as_ref()
-            .is_some_and(|t| t.exit.load(Ordering::Relaxed));
+            .is_some_and(|t| t.exit.load(Ordering::Acquire));
         if ctx.input(|i| i.viewport().close_requested())
             && !exiting
             && self.settings.close_to_tray
@@ -1526,6 +1602,8 @@ impl eframe::App for MonitorApp {
         self.draw(root);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Remove the tray icon promptly while the worker saves its final data.
+        drop(self.tray.take());
         self.worker.shutdown();
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1544,6 +1622,17 @@ fn install_fonts(ctx: &egui::Context) {
             .or_default()
             .insert(0, "Segoe UI".into());
         ctx.set_fonts(fonts);
+    }
+}
+fn wifi_display_name(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if clean.trim().is_empty() {
+        "Unnamed Wi-Fi".to_owned()
+    } else {
+        clean
     }
 }
 fn toggle_adapter(
@@ -1596,7 +1685,7 @@ fn filter_dropdown(
     label: String,
     multiple: bool,
     contents: impl FnOnce(&mut egui::Ui),
-) {
+) -> egui::Response {
     ui.allocate_ui_with_layout(
         Vec2::new(width, 28.0),
         egui::Layout::left_to_right(egui::Align::Center),
@@ -1604,6 +1693,11 @@ fn filter_dropdown(
             ui.set_width(width);
             egui::ComboBox::from_id_salt(id)
                 .width(width)
+                .height(if multiple {
+                    360.0
+                } else {
+                    ui.spacing().combo_height
+                })
                 .selected_text(label)
                 .wrap_mode(egui::TextWrapMode::Truncate)
                 .close_behavior(if multiple {
@@ -1611,9 +1705,11 @@ fn filter_dropdown(
                 } else {
                     egui::PopupCloseBehavior::CloseOnClick
                 })
-                .show_ui(ui, contents);
+                .show_ui(ui, contents)
+                .response
         },
-    );
+    )
+    .inner
 }
 const SUMMARY_CONTENT_HEIGHT: f32 = 104.0;
 fn summary_columns(rect: egui::Rect) -> [egui::Rect; 3] {
@@ -1710,7 +1806,7 @@ fn ranked_list(
                 } else {
                     format!("{}\n{}", row.label, row.subtitle)
                 };
-                usage_row(ui, &row.label, &row.label, &row.subtitle, (row.down, row.up), None).on_hover_text(help);
+                usage_row(ui, &row.label, &row.label, &row.subtitle, (row.down, row.up), None, None).on_hover_text(help);
             }
             if rows.is_empty() {
                 ui.weak("No matching traffic yet.");
@@ -1732,6 +1828,61 @@ fn format_count(value: u64) -> String {
     }
     out
 }
+/// The filled portions of the period's upload/download bar. An empty total
+/// leaves the neutral track visible; f64 arithmetic avoids overflowing u64.
+fn traffic_bar_segments(rect: egui::Rect, down: u64, up: u64) -> [Option<egui::Rect>; 2] {
+    let total = down as f64 + up as f64;
+    if total == 0.0 {
+        return [None, None];
+    }
+    let split = rect.left() + rect.width() * (down as f64 / total) as f32;
+    [
+        (down > 0).then_some(egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(split, rect.bottom()),
+        )),
+        (up > 0).then_some(egui::Rect::from_min_max(
+            egui::pos2(split, rect.top()),
+            rect.max,
+        )),
+    ]
+}
+
+fn traffic_distribution_bar(ui: &mut egui::Ui, down: u64, up: u64) {
+    let width = ui.available_width().max(0.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 10.0), egui::Sense::hover());
+    let painter = ui.painter().with_clip_rect(ui.clip_rect());
+    painter.rect_filled(rect, 5, widgets::border(ui));
+    let [download, upload] = traffic_bar_segments(rect, down, up);
+    if let Some(segment) = download {
+        painter.rect_filled(
+            segment,
+            egui::CornerRadius {
+                nw: 5,
+                sw: 5,
+                ne: if up == 0 { 5 } else { 0 },
+                se: if up == 0 { 5 } else { 0 },
+            },
+            download_color(ui),
+        );
+    }
+    if let Some(segment) = upload {
+        painter.rect_filled(
+            segment,
+            egui::CornerRadius {
+                nw: if down == 0 { 5 } else { 0 },
+                sw: if down == 0 { 5 } else { 0 },
+                ne: 5,
+                se: 5,
+            },
+            upload_color(ui),
+        );
+    }
+    response.on_hover_text(
+        "Share of downloaded and uploaded bytes in the selected period, adapters, and network.",
+    );
+}
+
 fn compact_bytes(value: u64) -> String {
     crate::model::format_compact_bytes(value)
 }
@@ -1742,6 +1893,7 @@ fn usage_row(
     subtitle: &str,
     bytes: (u64, u64),
     selection: Option<bool>,
+    icon: Option<egui::TextureId>,
 ) -> egui::Response {
     let (down, up) = bytes;
     let (rect, _) = ui.allocate_exact_size(
@@ -1795,6 +1947,29 @@ fn usage_row(
     let left = rect.left() + 7.0;
     let right = rect.right() - 7.0;
     let top = rect.top();
+    let text_left = if selection.is_some() {
+        let icon_rect = egui::Rect::from_min_size(egui::pos2(left, top + 6.0), Vec2::splat(24.0));
+        if let Some(texture) = icon {
+            ui.painter().image(
+                texture,
+                icon_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            // Neutral fallback for inaccessible, exited or not-yet-loaded executables.
+            ui.painter().rect_filled(icon_rect, 4, widgets::border(ui));
+            let glyph = icon_rect.shrink(6.0);
+            let stroke = egui::Stroke::new(1.2, ui.visuals().text_color().gamma_multiply(0.75));
+            ui.painter()
+                .rect_stroke(glyph, 1, stroke, egui::StrokeKind::Inside);
+            ui.painter()
+                .hline(glyph.x_range(), glyph.top() + 3.0, stroke);
+        }
+        left + 30.0
+    } else {
+        left
+    };
     let total = compact_bytes(down.saturating_add(up));
     let total_width = ui
         .painter()
@@ -1809,8 +1984,8 @@ fn usage_row(
     row_text(
         ui,
         egui::Rect::from_min_max(
-            egui::pos2(left, top + 3.0),
-            egui::pos2((right - total_width - 10.0).max(left), top + 22.0),
+            egui::pos2(text_left, top + 3.0),
+            egui::pos2((right - total_width - 10.0).max(text_left), top + 22.0),
         ),
         RichText::new(name).size(15.0).strong(),
     );
@@ -1825,7 +2000,10 @@ fn usage_row(
     );
     row_text(
         ui,
-        egui::Rect::from_min_max(egui::pos2(left, top + 22.0), egui::pos2(right, top + 36.0)),
+        egui::Rect::from_min_max(
+            egui::pos2(text_left, top + 22.0),
+            egui::pos2(right, top + 36.0),
+        ),
         RichText::new(subtitle).size(11.5).weak(),
     );
     let middle = left + (right - left) * 0.53;
@@ -1868,6 +2046,11 @@ fn app_name(path: &str) -> String {
 mod selection_tests {
     use super::*;
     #[test]
+    fn wifi_names_stay_single_line_without_changing_identity() {
+        assert_eq!(wifi_display_name("home\nnetwork"), "home network");
+        assert_eq!(wifi_display_name("\t"), "Unnamed Wi-Fi");
+    }
+    #[test]
     fn removing_an_adapter_does_not_add_an_invisible_sixth_selection() {
         let adapters = vec![
             Adapter {
@@ -1893,6 +2076,7 @@ mod compact_layout_tests {
     fn fixture() -> MonitorApp {
         MonitorApp {
             worker: Worker::for_ui_test(),
+            icons: IconCache::disabled(),
             tray: None,
             data: Shared::default(),
             settings: Settings::default(),
@@ -1909,7 +2093,6 @@ mod compact_layout_tests {
             app_search: String::new(),
             data_dir: PathBuf::new(),
             view_warning: String::new(),
-            show_filters: false,
             show_graph_options: false,
             app_cache: Arc::default(),
             app_cache_key: None,
@@ -2006,7 +2189,7 @@ mod compact_layout_tests {
                         app.page_header(ui);
                         ui.add_space(4.0);
                         limit = ui.max_rect().bottom();
-                        app.applications(ui);
+                        app.overview(ui);
                         bottom = ui.min_rect().bottom();
                     });
             },
@@ -2030,6 +2213,47 @@ mod compact_layout_tests {
             collect(&s.shape, &mut all);
         }
         all
+    }
+    #[test]
+    fn app_icon_sits_before_the_name_and_remains_part_of_the_clickable_row() {
+        fn find_icon(shape: &egui::Shape, texture: egui::TextureId) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| find_icon(shape, texture))
+                }
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(mesh.calc_bounds()),
+                _ => None,
+            }
+        }
+        let ctx = egui::Context::default();
+        Theme::Dark.apply(&ctx);
+        install_fonts(&ctx);
+        let mut app = app_fixture();
+        let path = r"C:\Apps\Long application directory 0\plain0.exe";
+        app.icons.insert_preview(
+            &ctx,
+            path,
+            egui::ColorImage::new([2, 2], vec![Color32::WHITE; 4]),
+        );
+        let texture = app.icons.texture(&ctx, path).unwrap();
+        let size = Vec2::new(1200.0, 820.0);
+        let (mut out, _, _) = app_frame(&mut app, &ctx, size, vec![]);
+        let icon = out
+            .shapes
+            .iter()
+            .find_map(|shape| find_icon(&shape.shape, texture))
+            .expect("App icon was not painted");
+        let name = text_positions(&out)
+            .into_iter()
+            .find(|(text, _)| text == "Friendly Browser")
+            .unwrap()
+            .1;
+        assert!(icon.right() < name.x && icon.top() <= name.y + 10.0);
+        assert!((icon.width() - 24.0).abs() < 0.1);
+        out.textures_delta.clear();
+        let (mut clicked, _, _) = app_frame(&mut app, &ctx, size, click_events(icon.center()));
+        clicked.textures_delta.clear();
+        assert_eq!(app.selected_app.as_deref(), Some(path));
     }
     #[test]
     fn app_lists_fit_and_keep_the_directory_directly_below_the_name() {
@@ -2503,6 +2727,52 @@ mod compact_layout_tests {
         assert!(restored.wide_summary_initialized);
     }
     #[test]
+    fn app_period_bar_proportions_cover_empty_single_and_large_totals() {
+        let rect = egui::Rect::from_min_size(egui::pos2(20.0, 5.0), Vec2::new(120.0, 10.0));
+        assert_eq!(traffic_bar_segments(rect, 0, 0), [None, None]);
+        assert_eq!(traffic_bar_segments(rect, 1, 0), [Some(rect), None]);
+        assert_eq!(traffic_bar_segments(rect, 0, 1), [None, Some(rect)]);
+        for (down, up, expected_fraction) in [(3, 1, 0.75), (1, 3, 0.25), (u64::MAX, u64::MAX, 0.5)]
+        {
+            let [Some(download), Some(upload)] = traffic_bar_segments(rect, down, up) else {
+                panic!("Missing bar segment");
+            };
+            assert!((download.width() / rect.width() - expected_fraction).abs() < 0.0001);
+            assert_eq!(download.left(), rect.left());
+            assert_eq!(download.right(), upload.left());
+            assert_eq!(upload.right(), rect.right());
+        }
+    }
+    #[test]
+    fn app_period_summary_stays_visible_and_uses_all_filtered_history() {
+        for size in [Vec2::new(960.0, 680.0), Vec2::new(1200.0, 820.0)] {
+            let ctx = egui::Context::default();
+            Theme::Dark.apply(&ctx);
+            install_fonts(&ctx);
+            let mut app = app_fixture();
+            let history = Arc::make_mut(&mut app.data.history);
+            history.down = 4 * 1024 * 1024;
+            history.up = 2 * 1024 * 1024;
+            app.app_search = "plain1".into();
+            app.selected_app = Some(r"C:\Apps\Long application directory 1\plain1.exe".into());
+            let (mut out, bottom, limit) = app_frame(&mut app, &ctx, size, vec![]);
+            let labels = text_positions(&out);
+            out.textures_delta.clear();
+            let at = |needle: &str| {
+                labels
+                    .iter()
+                    .find(|(text, _)| text == needle)
+                    .unwrap_or_else(|| panic!("Missing {needle}"))
+                    .1
+            };
+            let down_label = at("Downloaded");
+            let up_label = at("Uploaded");
+            assert!(down_label.y > at("Hosts").y && (down_label.y - up_label.y).abs() < 1.0);
+            assert!(at("4.0 MiB").x > down_label.x && at("2.0 MiB").x > up_label.x);
+            assert!(down_label.y < limit && bottom <= limit + 1.0);
+        }
+    }
+    #[test]
     fn app_controls_share_one_line_and_dense_rows_show_more_items() {
         let ctx = egui::Context::default();
         Theme::Dark.apply(&ctx);
@@ -2522,7 +2792,7 @@ mod compact_layout_tests {
         let period = at("Period: 1h");
         let adapters = at("Adapters: All");
         let network = at("Networks: All");
-        assert!(search.x < period.x && period.x < adapters.x && adapters.x < network.x);
+        assert!(period.x < adapters.x && adapters.x < network.x && network.x < search.x);
         assert!(
             [period, adapters, network]
                 .iter()
@@ -2538,7 +2808,7 @@ mod compact_layout_tests {
                     && p.y < size.y - 20.0
             })
             .count();
-        assert!(count >= 11, "Only {count} apps fit in the dense list");
+        assert!(count >= 10, "Only {count} apps fit in the dense list");
     }
     fn click_app_control(
         app: &mut MonitorApp,
@@ -2555,6 +2825,206 @@ mod compact_layout_tests {
             + Vec2::new(3.0, 5.0);
         out.textures_delta.clear();
         app_frame(app, ctx, size, click_events(pos)).0
+    }
+    #[test]
+    fn many_adapters_leave_wifi_choices_accessible() {
+        let ctx = egui::Context::default();
+        Theme::Dark.apply(&ctx);
+        install_fonts(&ctx);
+        let mut app = app_fixture();
+        app.data.snapshot.adapters = (0..40)
+            .map(|i| Adapter {
+                id: format!("adapter-{i}"),
+                name: format!("Adapter {i}"),
+                up: true,
+                ..Default::default()
+            })
+            .collect();
+        app.data.snapshot.wifi_networks = vec![WifiNetwork {
+            id: "home-id".into(),
+            name: "Home Wi-Fi".into(),
+        }];
+        let (mut warm, _, _) = app_frame(&mut app, &ctx, Vec2::new(1200.0, 820.0), vec![]);
+        warm.textures_delta.clear();
+        let mut opened = click_app_control(&mut app, &ctx, "Adapters: All");
+        opened.textures_delta.clear();
+        let (mut opened, _, _) = app_frame(&mut app, &ctx, Vec2::new(1200.0, 820.0), vec![]);
+        let position = text_positions(&opened)
+            .into_iter()
+            .find(|(text, _)| text == "Home Wi-Fi")
+            .map(|(_, position)| position);
+        opened.textures_delta.clear();
+        let position =
+            position.expect("Wi-Fi network should remain accessible below a long adapter list");
+        assert!(position.y < 820.0, "Wi-Fi choices extend beyond the window");
+        let mut selected = click_app_control(&mut app, &ctx, "Home Wi-Fi");
+        selected.textures_delta.clear();
+        assert_eq!(app.settings.filter.wifi_network.as_deref(), Some("home-id"));
+    }
+    #[test]
+    fn overview_and_app_filter_bars_have_the_same_height() {
+        for width in [960.0, 1440.0] {
+            for scale in [0.8, 0.9, 1.1] {
+                let mut heights = Vec::new();
+                for apps in [false, true] {
+                    let ctx = egui::Context::default();
+                    Theme::Dark.apply(&ctx);
+                    install_fonts(&ctx);
+                    ctx.set_zoom_factor(scale);
+                    let mut app = app_fixture();
+                    app.settings.filter.source = if apps {
+                        Source::Transport
+                    } else {
+                        Source::Adapter
+                    };
+                    let mut height = 0.0;
+                    let mut out = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(width, 680.0) / scale,
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            let top = ui.cursor().top();
+                            app.toolbar(ui, apps);
+                            height = ui.cursor().top() - top;
+                        },
+                    );
+                    out.textures_delta.clear();
+                    heights.push(height);
+                }
+                assert!(
+                    (heights[0] - heights[1]).abs() * scale <= 1.0,
+                    "width {width}, scale {scale}: {heights:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn overall_dropdowns_change_period_and_support_multiple_adapter_choices() {
+        let ctx = egui::Context::default();
+        Theme::Dark.apply(&ctx);
+        install_fonts(&ctx);
+        let mut app = app_fixture();
+        app.settings.filter.source = Source::Adapter;
+        app.data.snapshot.adapters = vec![
+            Adapter {
+                id: "eth".into(),
+                name: "Ethernet".into(),
+                up: true,
+                ..Default::default()
+            },
+            Adapter {
+                id: "wifi".into(),
+                name: "Wi-Fi".into(),
+                up: true,
+                ..Default::default()
+            },
+            Adapter {
+                id: "vpn".into(),
+                name: "VPN".into(),
+                up: true,
+                ..Default::default()
+            },
+        ];
+        let (mut warm, _, _) = app_frame(&mut app, &ctx, Vec2::new(1200.0, 820.0), vec![]);
+        warm.textures_delta.clear();
+        let mut out = click_app_control(&mut app, &ctx, "Period: 1h");
+        out.textures_delta.clear();
+        let mut out = click_app_control(&mut app, &ctx, "24 hours");
+        out.textures_delta.clear();
+        assert_eq!(app.settings.filter.seconds, 86400);
+        let mut out = click_app_control(&mut app, &ctx, "Adapters: All");
+        out.textures_delta.clear();
+        let mut out = click_app_control(&mut app, &ctx, "Ethernet");
+        assert_eq!(
+            app.settings.filter.adapters,
+            HashSet::from(["wifi".into(), "vpn".into()])
+        );
+        assert!(text_positions(&out).iter().any(|(s, _)| s == "Wi-Fi"));
+        out.textures_delta.clear();
+        let mut out = click_app_control(&mut app, &ctx, "Wi-Fi");
+        out.textures_delta.clear();
+        assert_eq!(app.settings.filter.adapters, HashSet::from(["vpn".into()]));
+    }
+    #[test]
+    fn wifi_connection_filter_is_independent_of_adapters_and_can_be_cleared() {
+        for source in [Source::Adapter, Source::Transport] {
+            let ctx = egui::Context::default();
+            Theme::Dark.apply(&ctx);
+            install_fonts(&ctx);
+            let mut app = app_fixture();
+            app.settings.filter.source = source;
+            app.settings.filter.adapters = HashSet::from(["wifi".into()]);
+            if source == Source::Transport {
+                app.settings.filter.scope = Scope::Wan;
+            }
+            app.data.snapshot.adapters = vec![
+                Adapter {
+                    id: "eth".into(),
+                    name: "Ethernet".into(),
+                    up: true,
+                    ..Default::default()
+                },
+                Adapter {
+                    id: "wifi".into(),
+                    name: "Wi-Fi".into(),
+                    up: true,
+                    ..Default::default()
+                },
+            ];
+            app.data.snapshot.wifi_networks = vec![
+                WifiNetwork {
+                    id: "home-id".into(),
+                    name: "Home Wi-Fi".into(),
+                },
+                WifiNetwork {
+                    id: "office-id".into(),
+                    name: "Office Wi-Fi".into(),
+                },
+            ];
+            let (mut warm, _, _) = app_frame(&mut app, &ctx, Vec2::new(1200.0, 820.0), vec![]);
+            warm.textures_delta.clear();
+            let mut out = click_app_control(&mut app, &ctx, "Adapters: 1");
+            out.textures_delta.clear();
+            let (mut out, _, _) = app_frame(&mut app, &ctx, Vec2::new(1200.0, 820.0), vec![]);
+            let present = text_positions(&out)
+                .iter()
+                .any(|(text, _)| text == "Office Wi-Fi");
+            out.textures_delta.clear();
+            assert!(present, "Remembered network is missing");
+            let mut out = click_app_control(&mut app, &ctx, "Office Wi-Fi");
+            out.textures_delta.clear();
+            assert_eq!(
+                app.settings.filter.wifi_network.as_deref(),
+                Some("office-id")
+            );
+            assert_eq!(app.adapter_filter_caption().0, "Wi-Fi: Office Wi-Fi");
+            assert_eq!(app.settings.filter.adapters, HashSet::from(["wifi".into()]));
+            let mut out = click_app_control(&mut app, &ctx, "Home Wi-Fi");
+            out.textures_delta.clear();
+            assert_eq!(app.settings.filter.wifi_network.as_deref(), Some("home-id"));
+            let mut out = click_app_control(&mut app, &ctx, "Unidentified Wi-Fi");
+            out.textures_delta.clear();
+            assert_eq!(
+                app.settings.filter.wifi_network.as_deref(),
+                Some(WIFI_UNKNOWN)
+            );
+            let mut out = click_app_control(&mut app, &ctx, "All connections");
+            out.textures_delta.clear();
+            assert_eq!(app.settings.filter.wifi_network, None);
+            assert_eq!(app.settings.filter.adapters, HashSet::from(["wifi".into()]));
+            assert_eq!(
+                app.settings.filter.scope,
+                if source == Source::Transport {
+                    Scope::Wan
+                } else {
+                    Scope::All
+                }
+            );
+        }
     }
     #[test]
     fn dropdowns_change_filters_and_keep_the_adapter_menu_open_for_multiple_choices() {
