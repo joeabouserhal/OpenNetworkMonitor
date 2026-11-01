@@ -107,13 +107,16 @@ try {
     foreach ($name in @('README.md', 'LICENSE', 'THIRD_PARTY.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination (Join-Path $packageRoot $name) -Force
     }
+    foreach ($name in @('install.ps1', 'uninstall.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot ('scripts/' + $name)) -Destination (Join-Path $packageRoot $name) -Force
+    }
     $docsRoot = Join-Path $packageRoot 'docs'
     New-Item -ItemType Directory -Path $docsRoot -Force | Out-Null
-    foreach ($name in @('ADMIN.md', 'ARCHITECTURE.md', 'ROADMAP.md', 'VALIDATION.md')) {
+    foreach ($name in @('ADMIN.md', 'ARCHITECTURE.md', 'PRIVACY.md', 'ROADMAP.md', 'UNINSTALL.md', 'VALIDATION.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot ('docs/' + $name)) -Destination (Join-Path $docsRoot $name) -Force
     }
     $screenshotsRoot = Join-Path $packageRoot 'screenshots'
-    foreach ($name in @('overview.png', 'app-traffic.png')) {
+    foreach ($name in @('overview.png', 'overview-light.png', 'app-traffic.png')) {
         $source = Join-Path $projectRoot ('screenshots/' + $name)
         if (Test-Path -LiteralPath $source -PathType Leaf) {
             New-Item -ItemType Directory -Path $screenshotsRoot -Force | Out-Null

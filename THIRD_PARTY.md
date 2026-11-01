@@ -2,6 +2,8 @@
 
 The dependency list and exact resolved versions are in Cargo.toml and Cargo.lock. Dependencies retain their respective licenses; this file is not a complete redistribution license bundle.
 
+- Other direct dependencies, all MIT or Apache-2.0: [anyhow](https://github.com/dtolnay/anyhow), [chrono](https://github.com/chronotope/chrono), [csv](https://github.com/BurntSushi/rust-csv), [serde](https://github.com/serde-rs/serde) and serde_json, [windows](https://github.com/microsoft/windows-rs) and windows-sys (Microsoft), raw-window-handle, and, for tests only, [tempfile](https://github.com/Stebalean/tempfile).
+- Fonts: the Windows UI uses Segoe UI and Cascadia Mono when installed on the user's PC; neither is bundled. egui's bundled fallback fonts are Ubuntu-Light, Hack, NotoEmoji-Regular and emoji-icon-font. Ubuntu-Light is under the [Ubuntu Font Licence](https://ubuntu.com/legal/font-licence), Hack under the MIT licence with the Bitstream Vera licence for its base glyphs, and NotoEmoji under the SIL Open Font Licence 1.1. Their full notices are published with egui at https://github.com/emilk/egui/tree/master/crates/epaint_default_fonts.
 - Build-time resource tools: [embed-resource](https://github.com/nabijaczleweli/rust-embed-resource) and [ico](https://github.com/mdsteele/rust-ico) (MIT).
 - egui / eframe: https://github.com/emilk/egui (MIT OR Apache-2.0).
 - FerrisETW: https://github.com/n4r1b/ferrisetw (MIT). The project credits Microsoft's KrabsETW.
@@ -11,7 +13,7 @@ The dependency list and exact resolved versions are in Cargo.toml and Cargo.lock
 - Nord palette: https://github.com/nordtheme/nord (MIT). Copyright (c) 2016-present Arctic Ice Studio and Sven Greb.
 - Catppuccin Mocha palette: https://github.com/catppuccin/catppuccin (MIT). Copyright (c) 2021 Catppuccin.
 
-The Nord and Catppuccin settings apply selected palette colors to native egui visuals; they are not third-party theme engines. The application's Dark and Light presets are original combinations with egui defaults.
+The Nord and Catppuccin settings apply selected palette colors to native egui visuals; they are not third-party theme engines. The application's Slate and Light presets are original combinations with egui defaults.
 
 ## Palette license notice
 

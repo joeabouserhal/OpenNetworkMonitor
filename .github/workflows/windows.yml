@@ -1,24 +1,111 @@
 name: Windows checks
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# A pull request also triggers the push of its branch; keep only the newest run for a ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
+# Third-party actions are pinned to the commit of a released version, so a moved tag
+# cannot change what runs. Update the comment and the hash together.
+env:
+  RUST_VERSION: 1.99.0
+
 jobs:
   verify:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check, build and package
         shell: pwsh
         run: ./build.ps1
+      # Probes of the real Windows environment that need no elevation or network. They
+      # report problems without holding up the build, since runner images vary.
+      - name: Native probes
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          foreach ($probe in 'native_wifi_query_returns_sanitized_status', 'native_inventory_identity_probe', 'windows_executable_icon_contains_visible_pixels', 'native_startup_definition_is_valid_without_registration') {
+            cargo test --locked $probe -- --ignored
+            if ($LASTEXITCODE -ne 0) { throw "$probe failed" }
+          }
       - name: Upload Windows package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: OpenNetworkMonitor-windows
           path: |
             dist/*.zip
             dist/*.sha256
           if-no-files-found: error
+
+  # The version in Cargo.toml says the oldest compiler the project supports. This only
+  # checks that the code still compiles with it.
+  minimum-rust:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo check --locked --all-targets
+
+  # Licence, source and duplicate-crate rules live in deny.toml. Known security advisories
+  # are reported separately because new ones can appear without any change here.
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check licenses sources bans
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+
+  # Pushing a tag such as v0.4.0 publishes the package built above as a GitHub release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag must match the package version
+        shell: pwsh
+        run: |
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ('v' + $version -ne '${{ github.ref_name }}') {
+            throw "Tag ${{ github.ref_name }} does not match Cargo.toml version $version."
+          }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: OpenNetworkMonitor-windows
+          path: release
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ github.ref_name }}' (Get-ChildItem release -File).FullName `
+            --title '${{ github.ref_name }}' --generate-notes

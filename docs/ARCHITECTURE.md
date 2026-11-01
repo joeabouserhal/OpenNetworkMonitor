@@ -9,7 +9,7 @@ The desktop executable has a single collector thread and an egui/eframe UI threa
 - `titlebar.rs`: colours the native Windows title bar from the active palette through DWM.
 - `capture/instance.rs`: single-instance lock and hand-over from an older running build (see below).
 - `capture/etw.rs`: uniquely named, app-owned ETW session; TCP and UDP providers; bounded nonblocking queue; decode/drop/kernel-loss counters. Capture never stops another program's trace session.
-- `worker.rs`: sampling, endpoint aggregation, offline geolocation, SQLite writes, filter queries, export and retention. Rendering can stop while collection continues.
+- `worker.rs`: sampling, endpoint aggregation, offline geolocation, SQLite writes and alerts. History queries, an app's timeline and CSV export run on their own read-only connections and threads, so neither rendering nor a slow query holds up collection.
 - `store.rs`: SQLite WAL mode, transactional minute upserts, gap-aware chart series, filtered export with formula escaping. Failed writes are retained for retry up to a bounded row limit, after which a persistent warning reports that history stopped.
 - `graph.rs`: custom egui plot with direction toggles, log scale, time labels and a hover crosshair with tooltip, plus the LAN/WAN destination breakdown.
 - `widgets.rs`: the design system: palette tokens, typography, icons and the shared controls (see v0.4 below).
@@ -30,7 +30,7 @@ ETW uses payload PID rather than event-header PID. Only data send/receive opcode
 
 ## Storage and resource limits
 
-A bundled SQLite engine avoids an external database dependency. Samples are committed each second into minute buckets, preserving source/adapter/application/PID/remote IP/protocol/scope/traffic type. Country is a descriptive field, never part of the byte identity. Default history retention is 30 days; pruning runs hourly. Database files and optional country databases are excluded from Git.
+A bundled SQLite engine avoids an external database dependency. Samples are committed each second into minute buckets, preserving source/adapter/application/PID/remote IP/protocol/scope/traffic type. Country is a descriptive field, never part of the byte identity. History has no automatic expiry; only the raw per-second adapter samples are pruned (after 24 hours, checked hourly). Database files and optional country databases are excluded from Git.
 
 The ETW queue holds at most 65,536 events, and a tick drains at most that many. The country cache holds at most 4,096 addresses. Only current-interval events and current socket inventory are kept in the live snapshot. History query results are bounded to the selected retention window, with at most roughly 600 plotted time buckets. Detailed endpoint history can grow with traffic volume and needs pagination in a future version.
 
@@ -48,7 +48,7 @@ Capture timestamps are converted directly from the original Windows UTC FILETIME
 
 ## v0.2.1 period-linked durable chart
 
-Schema version 3 adds adapter_samples, keyed by timestamp and adapter GUID, with received/sent deltas and elapsed duration. Recent raw samples retain 24 hours of history; minute totals keep the existing 30-day retention. The final partial sample can share a timestamp with the prior tick, so its deltas and elapsed duration are added atomically. Each capture transaction commits the minute-level usage and raw samples together; pending data remains for retry if the transaction fails.
+Schema version 3 adds adapter_samples, keyed by timestamp and adapter GUID, with received/sent deltas and elapsed duration. Recent raw samples retain 24 hours of history; minute totals are kept indefinitely. The final partial sample can share a timestamp with the prior tick, so its deltas and elapsed duration are added atomically. Each capture transaction commits the minute-level usage and raw samples together; pending data remains for retry if the transaction fails.
 
 History includes explicit requested window_start/window_end and Point.observed. The chart never derives its time domain from the first or last observed point. Raw samples provide recent rates and minute aggregates cover older legacy history; missing intervals insert gap markers. No zero-fill or independent Live/History mode remains. The UI lays out the adapter view directly rather than inside a scroll area and allocates the plot from the remaining height after reserving the compact summary row.
 
@@ -64,7 +64,7 @@ hosts.rs uses two native Windows resolver workers, queues of 128 and a cache cap
 
 ## v0.3 UI consistency
 
-Only Overview, Connections, Adapters and Settings are navigation destinations. Overview retains the two direct Adapter traffic / App traffic buttons. A shared draw method renders the same shell in production, headless layout checks and the opt-in sample-data preview. Native monitoring, persistence and tray shutdown keep their existing ownership.
+Only Overview, Connections, Adapters and Settings are navigation destinations. Overview retains the two direct Overall Traffic / App traffic buttons. A shared draw method renders the same shell in production, headless layout checks and the opt-in sample-data preview. Native monitoring, persistence and tray shutdown keep their existing ownership.
 
 widgets.rs centralizes panel borders/margins, badges, text placement, focus-visible navigation and integer column geometry. Three-column layouts allocate exact widths rather than multiplying fractional minimum widths; this avoids border expansion at the minimum window size. App rows use 15.5-point names, 17-point totals, 13.5-point directory subtitles and separately labeled/color-coded Down/Up values. Hover details retain full paths and current rates. Keyboard focus is visible on navigation and app rows.
 
@@ -92,7 +92,7 @@ The default viewport is 1440x820 points. A persisted wide_summary_initialized pr
 
 App traffic has one bounded, non-wrapping filter bar: period, adapters, network scope and search. Each dropdown owns a stable ID. The adapter popup uses CloseOnClickOutside to support several checkbox changes before dismissal; the same adapter-choice function serves the Overall Traffic adapter chooser. Filter changes refresh history once, retaining an app selection while replacement data is pending.
 
-The Overview subtitle and standing selection hint are removed. Clear selection moves to All apps in the Apps heading, with a fixed heading height shared by all columns. App/host/type rows shrink from 78 to 56 points. Primary labels/totals stay prominent; directories and other subtitles are 11.5 points, as are Down/Up details. All lists continue to virtualize and scroll independently. Paths and full values remain in hover details. Both Overview views share a compact filter bar, including period and multi-adapter dropdowns.
+The Overview subtitle and standing selection hint are removed. Clear selection moves to All apps in the Apps heading, with a fixed heading height shared by all columns. App/host/type rows shrink from 78 to 54 points. Primary labels/totals stay prominent; directories and other subtitles are 11.5 points, as are Down/Up details. All lists continue to virtualize and scroll independently. Paths and full values remain in hover details. Both Overview views share a compact filter bar, including period and multi-adapter dropdowns.
 
 ## Wi-Fi connection history
 
@@ -149,3 +149,34 @@ eframe saves the window's size and position at exit. A minimized Windows window 
 ## Exit from the tray
 
 Choosing Exit from the tray menu while the window is open used to leave it open until the window was focused. The request was queued (hide, then close) but, after the menu closes, the event loop stops drawing frames until the window gets an input event, and a queued viewport command only runs during a frame. Reproduced with the real app and the real tray menu: no frame ran after the choice, and focusing the window let the exit finish at once. `request_exit` now also posts mouse-move messages to the main window every 100 ms, with a position that changes each time because an unchanged one is ignored, until the window is gone. These are ordinary input, so the loop runs a frame and processes the queued exit through the normal path, saving state and joining the collector first. The window handle is recorded at startup by `tray::remember_window`. The build hand-over uses the same function.
+
+
+## Reading history without slowing capture
+
+The collector thread owns the only writing connection. `HistoryReader` in worker.rs opens a second read-only SQLite connection (write-ahead logging allows concurrent readers) on its own thread. The collector sends it the current filter and revision about once a second for periods up to a day and every five seconds for longer ones; it answers with history, summary totals, display names and, when an app is selected, that app's timeline. Only the newest request is served. An unchanged answer does not bump the generation the window watches, and exit interrupts a running query. A database without a file (in-memory tests) reads inline. CSV export uses the same kind of reader on a thread of its own, and a background thread runs the integrity scan.
+
+The window copies the shared state under a lock once per snapshot. The snapshot is shared by `Arc`, per-app history totals are cached until the next history load, and the Connections list is filtered and sorted only when a new snapshot, search, sort or filter arrives.
+
+## History layout
+
+Schema version 6 stores minute usage in a `WITHOUT ROWID` table whose key starts with source and minute, so every period query is a range over the table itself and no separate time index exists. Migration from version 5 rewrites the table in one transaction, then vacuums once to return the old table's space. The scan for damage runs first for any file that needs migrating. The journal file is capped at 64 MiB. A newer-version history is refused with a recognisable error and is never replaced. A history that cannot be opened is offered for moving aside with its write-ahead files, never deleted.
+
+## Sign-in startup guard
+
+startup/location.rs reads each file's owner and access list with `GetNamedSecurityInfoW`. The executable and its folder must not be writable, replaceable or deletable by anyone but SYSTEM, administrators and service accounts, and no folder above it may be replaceable. Entries that only apply to child objects are ignored. The decision logic is separate from the Windows call so it is tested with synthetic access lists; a native test checks that a system folder passes and a temporary folder fails.
+
+## Alerts
+
+alerts.rs holds the decisions and notify.rs the Windows toast. The collector reports each app the first time it sends traffic; apps already in the saved history are never new. Once a minute it sums this cycle's adapter usage against the cap and announces 80% and 100% once per cycle, remembering the level in `alerts.json`. Nothing is announced while recording is paused. A toast needs an app identity, which is registered under the current user's registry hive; the banner in the window is always set as well.
+
+## App timeline
+
+The selected app's series is read by the history reader at minute resolution for periods up to two days and hourly beyond that. **Over time** shows bars sized to the period. **Daily** and **Monthly** read their own span (30 days, 12 months) regardless of the period, still honouring the adapter, Wi-Fi network and destination filters, and are reused for 30 seconds before being read again.
+
+## Tray controls and pause
+
+The tray menu's check item and Open Settings set flags that the window reads each frame, then forwards pause to the worker as a command. While paused the worker keeps sampling for the live display but skips writes, raw samples and alerts. The tooltip is refreshed from the window when a snapshot changes.
+
+## Accessibility of painted text
+
+Text painted directly onto the canvas is invisible to screen readers, so `widgets::describe` registers a labelled node over its rectangle, and rows and charts add labels to their own responses. A test enables AccessKit and reads the labels back.

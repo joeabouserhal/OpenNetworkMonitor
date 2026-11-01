@@ -14,7 +14,7 @@ Use Windows with Rust 1.95+ (MSVC toolchain) and Visual Studio C++ Build Tools. 
 .\build.cmd
 ```
 
-The script runs formatting, tests and strict Clippy, builds the release, and creates a versioned app folder, ZIP and SHA-256 checksum under `dist/`. It preserves an in-use build without terminating the running monitor. Exit the older copy from its tray before opening the new one. Compilation does not require administrator access.
+The script runs formatting, tests and strict Clippy, builds the release, and creates a versioned app folder, ZIP and SHA-256 checksum under `dist/`. It preserves an in-use build without terminating the running monitor. Opening a newer build while an older copy runs asks that copy to save its data and exit, then takes over; if the older copy predates that hand-over, exit it from its tray first. Compilation does not require administrator access.
 
 For a faster rebuild after checks have already passed, use `.\build.ps1 -SkipChecks`. For a debug package, use `.\build.ps1 -Configuration Debug`. The script uses only project-local output folders and does not install toolchains or change system configuration. The Command Prompt wrapper's execution-policy setting applies only to its PowerShell process.
 
@@ -25,7 +25,7 @@ cargo build --locked --release
 .\target\release\OpenNetworkMonitor.exe
 ```
 
-The executable now embeds an administrator requirement. Opening it requests Windows approval automatically, so detailed per-application monitoring starts with the required access. Build normally, then open the executable through Explorer; use an elevated terminal for `cargo run` or command-line diagnostics. The app does not install a driver, service, or firewall rule. Optional launch at sign-in can be enabled in Settings → Background monitoring. It uses a per-user Windows scheduled task so the app can start with the administrator access required for monitoring.
+The executable now embeds an administrator requirement. Opening it requests Windows approval automatically, so detailed per-application monitoring starts with the required access. Build normally, then open the executable through Explorer; use an elevated terminal for `cargo run` or command-line diagnostics. The app does not install a driver, service, or firewall rule. Optional launch at sign-in can be enabled in Settings → Background monitoring. It uses a per-user Windows scheduled task so the app can start with the administrator access required for monitoring. Because that task runs elevated, the setting is only offered when the app sits in a folder that ordinary programs cannot change, such as Program Files; see [docs/UNINSTALL.md](docs/UNINSTALL.md) for the installer script.
 
 Closing the window hides it to the system tray by default. Left-click the tray icon to reopen it; right-click → **Exit** hides the window immediately and stops the app after saving its final data. If creating the tray fails, closing the window exits instead. The process must remain running to record traffic.
 
@@ -45,7 +45,7 @@ These previews use generated sample data.
 - Upload/download, LAN/WAN/Unknown classification, adapter association from the local address, and an explicit Unassigned category.
 - Two Overview buttons: **Overall Traffic** and **App traffic**. The compact adapter view fits its chart, compact upload/download summary and horizontal LAN/WAN breakdown without scrolling at the supported minimum window size. Its chart uses smooth, shape-preserving curves within exactly the selected usage period; recorded samples stay unchanged and unrecorded intervals remain blank. Both views use matching period and multi-adapter dropdowns; App traffic adds a network dropdown and search on the same line, followed by a compact total download/upload summary with a proportional bar below the lists. Advanced chart controls are tucked away.
 - The Overall Traffic footer includes the **top five apps** by combined upload/download, using the selected period and adapters. With All adapters selected, this matches App traffic and includes loopback and unattributed transfers. Totals and the LAN/WAN bar share a compact band without repeating the period. The default window is wider; existing windows widen once for this layout and then retain later resizing.
-- Dense 56-point rows in App traffic show Windows executable icons with a fallback when unavailable, alongside smaller directories/host/type descriptions and Down/Up figures. Overview omits the descriptive subtitle and the list omits the standing selection hint. Selected apps can be cleared from the Apps heading.
+- Dense 54-point rows in App traffic show Windows executable icons with a fallback when unavailable, alongside smaller directories/host/type descriptions and Down/Up figures. Overview omits the descriptive subtitle and the list omits the standing selection hint. Selected apps can be cleared from the Apps heading.
 - Three compact, independently scrolling columns: **Apps**, **Hosts** and **Traffic type**, each ranked by combined upload and download in the selected usage period. App names show the executable directory directly below; absent friendly metadata, the exact executable filename is kept. Selecting an app filters the adjacent lists; selecting it again or choosing All apps clears that selection. Live rates remain in app tooltips.
 - Background host-name resolution through the Windows system resolver, with IP fallback. Common traffic types (HTTP, HTTPS/TLS, DNS, QUIC and others) are inferred from connection ports and saved with history. No payload inspection or decryption is performed.
 - Live TCP connection and UDP socket inventory, process names, local/remote endpoints, protocol and state.
@@ -53,11 +53,16 @@ These previews use generated sample data.
 - A compact 90% default interface size, adjustable from 80% to 110% in Settings → Appearance. The saved size applies throughout the app.
 - A modern, minimal interface: tonal cards, Segoe UI Semibold/Light typography, pill filters and popovers. **Slate** is the dark default, with Light, Nord and Catppuccin Mocha palettes. Colour is reserved for data (download blue, upload orange). On Windows 11 the title bar takes the theme colour too.
 - Four sidebar destinations: Overview, Connections, Adapters and Settings (the sidebar becomes an icon rail in narrow windows). App traffic lives in Overview. Ranked rows show Down/Up values and a slim usage bar, and a persistent monitoring status keeps navigation consistent.
-- A fitted Connections table with PID/folder subtitles, bounded address columns and full-value tooltips. Adapter actions align across rows and open the selected adapter directly in Overview. Settings are grouped into sections, with detailed measurement notes collapsed by default.
+- A Connections table with PID/folder subtitles, resolved host names under public addresses, sortable column headers, Protocol and Status filters, and a right-click menu to copy addresses or details, show only one app, open its file location or end the process (after confirmation). Adapter actions align across rows and open the selected adapter directly in Overview. Settings are grouped into sections, with detailed measurement notes collapsed by default.
 - SQLite minute-level history kept indefinitely, stored in `%LOCALAPPDATA%\OpenNetworkMonitor\usage.db`.
 - CSV export of the current usage filters (including the app search or selected app), with UTC timestamps, raw byte counts and traffic types. Existing export files are not overwritten.
 - Optional **Launch when I sign in to Windows** in Settings → Background monitoring. It starts this copy in the system tray, uses the current user's elevated interactive session, and can be turned off from the same setting.
-- Persisted theme, filters, units, country-database path, window state and close-to-tray preference.
+- Selecting an app in App traffic adds a bar chart of its own usage. **Over time** follows the selected period; **Daily** always shows the last 30 calendar days and **Monthly** the last 12 months, whatever the period.
+- Optional alerts in Settings → Alerts: a notification the first time an app is seen using the network, and a monthly data cap with a configurable reset day that warns at 80% and when it is used up. Alerts appear as Windows notifications and as a banner; the cap meter is in Settings and the sidebar.
+- **Match Windows appearance** switches between Slate and Light with the system setting (on for new installs). Keyboard shortcuts: Ctrl+1 to Ctrl+4 change page, Ctrl+F focuses search, Ctrl+E exports, Esc clears the selected app.
+- Tray menu: Open, Open Settings, **Pause recording** (capture and the live display continue, nothing is saved) and Exit. The tray tooltip shows the live speeds.
+- Painted figures, the chart and Connections rows have labels for screen readers.
+- Persisted theme, filters, units, alert choices, country-database path, window state and close-to-tray preference.
 - Single-instance lock, visible capture errors and loss counters, bounded event queue and country cache, storage retries, background worker independent from rendering.
 
 ## Understand the measurements
@@ -76,7 +81,7 @@ TCP downloads recorded before the receive-endpoint fix can have an incorrect des
 
 LAN includes private, loopback, link-local, multicast, broadcast and on-link destinations. WAN means public destinations; reserved/shared ranges are Unknown. This is an address-based classification, not proof of a routing boundary. Public destinations routed through a private gateway remain WAN. Adapter association is inferred from a unique local-address match; ambiguous matches remain Unassigned.
 
-Socket tables expose TCP remote endpoints but not UDP destinations. Observed UDP destinations appear in the application history when ETW is active. Socket inventory is refreshed every five seconds independently of the usage filters. Friendly names come from Windows FileDescription/ProductName resources, so browsers such as Helium retain their brand even when the binary is named chrome.exe. Process identities are refreshed every five seconds; very short-lived processes can remain unnamed and PID reuse inside that interval is a known limitation.
+Socket tables expose TCP remote endpoints but not UDP destinations. Observed UDP destinations appear in the application history when ETW is active. Socket inventory is refreshed every five seconds independently of the usage filters. Friendly names come from Windows FileDescription/ProductName resources, so browsers such as Helium retain their brand even when the binary is named chrome.exe. Process identities are refreshed every five seconds, and a process that sends traffic between refreshes is named at once while it is still running. A process that exits before it can be looked up can still appear as Process N, and PID reuse inside the refresh interval is a known limitation.
 
 Host names use reverse DNS through your configured Windows resolver, on two background threads with bounded queues and caching. Requests occur for the displayed host list. Shared hosting/CDN names can differ from the website visited; IPs remain in subtitles or tooltips. Host-name resolution can generate ordinary DNS traffic. It does not contact a separate IP lookup service. Traffic-type labels are port-based estimates, so encrypted DNS carried on HTTPS ports appears as HTTPS/TLS. Existing history without recorded ports remains **Unclassified**, retaining its original byte counts.
 
@@ -87,7 +92,7 @@ History is stored in UTC minute buckets with no automatic expiry. Histories alre
 ```powershell
 cargo fmt --check
 cargo test
-cargo clippy --all-targets -- -D warnings
+cargo clippy --locked --all-targets --features ui-preview -- -D warnings
 cargo run -- --diagnose 8
 # In an elevated terminal:
 cargo run -- --self-test-capture
@@ -97,7 +102,7 @@ cargo run -- --self-test-public
 
 `--diagnose` prints adapter inventory, connection/process counts, per-protocol observed events, byte deltas and loss counters. `--self-test-capture` generates known local TCP and UDP payloads over IPv4 and IPv6 and checks payload delivery and endpoint attribution. `--self-test-public` makes a small, fixed HTTP request to 1.1.1.1:80 and checks the captured TCP endpoints, adapter, WAN classification and byte counts. The diagnostic process does not write usage history, though an already running monitor can record its test traffic. Neither test changes network configuration or installs anything.
 
-See [docs/ADMIN.md](docs/ADMIN.md) for administrator-launch details, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md), and [docs/VALIDATION.md](docs/VALIDATION.md). Build/test status is recorded in the validation document, including checks that could not be completed.
+See [docs/ADMIN.md](docs/ADMIN.md) for administrator-launch details, [docs/PRIVACY.md](docs/PRIVACY.md) for what is stored and changed, [docs/UNINSTALL.md](docs/UNINSTALL.md) for installing and removing the app, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md), and [docs/VALIDATION.md](docs/VALIDATION.md). Build/test status is recorded in the validation document, including checks that could not be completed.
 
 ## Sources
 
@@ -113,7 +118,7 @@ MIT license. Theme and dependency credits are in [THIRD_PARTY.md](THIRD_PARTY.md
 
 ## Storage reliability
 
-Live adapter samples and usage totals commit together, using SQLite FULL synchronization. A normal exit stops the event producer, drains its final buffers, commits the last partial sample and performs a nonblocking database checkpoint before the worker finishes. If another reader holds the database, committed data stays in the WAL until it can be checkpointed later. Saved chart data loads before the first new live tick after reopening. SQLite integrity is checked on open; corrupted history is reported rather than silently replaced with an empty database. The bundled SQLite version is 3.54.1.
+Live adapter samples and usage totals commit together, using SQLite FULL synchronization. A normal exit stops the event producer, drains its final buffers, commits the last partial sample and performs a nonblocking database checkpoint before the worker finishes. If another reader holds the database, committed data stays in the WAL until it can be checkpointed later. Saved chart data loads before the first new live tick after reopening. SQLite integrity is checked in the background after launch, and before any upgrade of the file layout; a history that cannot be opened is never silently replaced: the app offers to move the damaged files aside, keeping them, and start a new history. Reading history for the chart and lists happens on a separate read-only connection so it never delays capture. The bundled SQLite version is 3.54.1.
 
 ## UI development
 

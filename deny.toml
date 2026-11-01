@@ -1,0 +1,32 @@
+# Rules checked by `cargo deny check` (see .github/workflows/windows.yml).
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+
+[licenses]
+# Every crate in the build is under one of these permissive licences; anything else,
+# such as a copyleft licence, should be a deliberate decision.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "Unicode-3.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Different versions of one crate are common in large GUI dependency trees; report them
+# without failing.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

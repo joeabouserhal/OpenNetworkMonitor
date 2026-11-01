@@ -1,6 +1,6 @@
 # Validation
 
-The current Windows build passes formatting, strict Clippy, and 81 default automated tests. The optimized MSVC executable embeds `requireAdministrator` with `uiAccess=false`. No driver or Npcap installation is required for the native capture path.
+The current Windows build passes formatting, strict Clippy, and 150 default automated tests. The optimized MSVC executable embeds `requireAdministrator` with `uiAccess=false`. No driver or Npcap installation is required for the native capture path.
 
 ## Reproduce the checks
 
@@ -8,7 +8,7 @@ Run `./build.ps1` on Windows with Rust 1.95+ MSVC and Visual Studio C++ Build To
 
 The default suite covers expanded period selection, custom duration/date validation, indefinite history across cleanup/reopen, date-filtered chart/summary/CSV parity, source isolation, TCP and UDP endpoint orientation, LAN/WAN classification, adapter selection, minute rollups, saved-history restoration, a nonblocking checkpoint with an active reader, transactional retries, CSV filters and escaping, app/type aggregation, top-five ranking parity with App traffic (including loopback and unattributed bytes), smooth curves without overshoot or gap bridging, window bounds, compact layouts, themes, contrast and dropdown interactions.
 
-Seven live-machine probes are ignored by default. They read Windows startup state, Wi-Fi profiles, adapter/process metadata and a system executable icon, exercise worker shutdown/reopen with a temporary database, and query the configured DNS resolver. The final-event shutdown probe requires administrator access and generates local TCP traffic; an already running monitor may record it. Run individual ignored tests explicitly when appropriate. The generated-traffic capture test is separate: in an elevated terminal, run `cargo run -- --self-test-capture`. It checks attribution, addresses, ports, timestamps, exact TCP/UDP payload counts and event losses over IPv4 and IPv6. The optional `cargo run -- --self-test-public` makes a small HTTP request to 1.1.1.1:80 and checks TCP endpoints, adapter attribution, WAN classification and byte counts. Both capture self-tests passed on the development machine after the TCP receive fix. Diagnostic reports can contain local addresses; keep them local.
+Seven live-machine probes are ignored by default; CI runs four of them (Wi-Fi query, adapter and process inventory, executable icon, startup definition) in a separate informational step. They read Windows startup state, Wi-Fi profiles, adapter/process metadata and a system executable icon, exercise worker shutdown/reopen with a temporary database, and query the configured DNS resolver. The final-event shutdown probe requires administrator access and generates local TCP traffic; an already running monitor may record it. Run individual ignored tests explicitly when appropriate. The generated-traffic capture test is separate: in an elevated terminal, run `cargo run -- --self-test-capture`. It checks attribution, addresses, ports, timestamps, exact TCP/UDP payload counts and event losses over IPv4 and IPv6. The optional `cargo run -- --self-test-public` makes a small HTTP request to 1.1.1.1:80 and checks TCP endpoints, adapter attribution, WAN classification and byte counts. Both capture self-tests passed on the development machine after the TCP receive fix. Diagnostic reports can contain local addresses; keep them local.
 
 ## UI review
 
@@ -30,3 +30,7 @@ Custom period styling was reviewed through sample-data Slate and Light renders. 
 Rolling and date-range modes share the same sunken input styling and fixed dialog body. Geometry checks confirm equal dialog size with and without validation messages in all four themes at 80% and 110% interface size.
 
 Period menu rows use compact spacing. Month-to-date uses local calendar boundaries and is tested for month/year rollover, saved selection, and matching history, summaries and CSV. The redundant rolling end-time row is removed and the fixed dialog body is smaller.
+
+## Continuous integration
+
+.github/workflows/windows.yml runs `build.ps1` (formatting, tests, strict Clippy, release build and package) on a pinned Rust version, uploads the package, and runs four of the native probes in an informational step. A second job compiles with the minimum supported Rust version, and a third checks licences, registry sources and security advisories with cargo-deny using deny.toml; both are informational because they depend on external tooling that has not been exercised locally. Third-party actions are pinned to the commit of a released version. Pushing a tag such as `v0.4.0` that matches the version in Cargo.toml publishes the package and its checksum as a GitHub release. Releases are not code-signed.
