@@ -47,6 +47,8 @@ impl MonitorApp {
         if let Some(id) = view_adapter {
             self.page = Page::Overview;
             self.settings.filter.adapters = HashSet::from([id]);
+            // The card promises everything on this adapter, not one Wi-Fi network of it.
+            self.settings.filter.wifi_network = None;
             self.settings.filter.source = Source::Adapter;
             self.update_filter();
         }

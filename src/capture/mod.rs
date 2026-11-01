@@ -7,5 +7,6 @@ pub use etw::EtwCapture;
 pub use identity::process_labels;
 pub use instance::{InstanceGuard, spawn_quit_listener};
 pub use windows::{
-    adapters, all_adapters, connections, historical_adapter_ids, process_names, visible_adapter_ids,
+    adapters, all_adapters, connections, historical_adapter_ids, process_is_gone, process_name,
+    process_names, visible_adapter_ids,
 };

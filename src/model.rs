@@ -345,12 +345,19 @@ pub fn classify(remote: IpAddr, local_networks: &[(IpAddr, u8)]) -> Scope {
         }
         IpAddr::V6(v) => {
             let s = v.segments();
+            // Only multicast that stays on a link, site or organisation is local;
+            // global-scope groups (ff0e::) reach the internet.
+            let local_multicast = v.is_multicast() && matches!(s[0] & 0xf, 1..=5 | 8);
+            let nat64 = s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0);
             if v.is_loopback()
-                || v.is_multicast()
+                || local_multicast
                 || (s[0] & 0xfe00) == 0xfc00
                 || (s[0] & 0xffc0) == 0xfe80
             {
                 Scope::Lan
+            } else if nat64 {
+                // Translated IPv4 destinations on an IPv6-only network.
+                Scope::Wan
             } else if (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8) {
                 Scope::Wan
             } else {
@@ -422,12 +429,19 @@ mod tests {
             "224.0.0.1",
             "fd00::1",
             "fe80::1",
+            "ff02::fb",
+            "ff05::1:3",
             "::1",
             "::ffff:192.168.1.2",
         ] {
             assert_eq!(classify(ip.parse().unwrap(), &[]), Scope::Lan, "{ip}");
         }
-        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+        for ip in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+        ] {
             assert_eq!(classify(ip.parse().unwrap(), &[]), Scope::Wan);
         }
         for ip in [
@@ -436,6 +450,7 @@ mod tests {
             "192.0.2.2",
             "198.18.0.1",
             "2001:db8::1",
+            "ff0e::1",
             "::",
         ] {
             assert_eq!(classify(ip.parse().unwrap(), &[]), Scope::Unknown, "{ip}");

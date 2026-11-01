@@ -125,6 +125,36 @@ impl Drop for OwnedHandle {
         }
     }
 }
+/// Whether Windows has no process with this id any more. A process that exists but
+/// refuses query access is not gone.
+pub fn process_is_gone(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, GetLastError};
+    // SAFETY: query-only permissions; a valid handle is closed by the guard.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // SAFETY: reads the calling thread's last error right after the failed call.
+        return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
+    }
+    drop(OwnedHandle(handle));
+    false
+}
+/// Full image path of one running process, `None` once it has exited or when
+/// Windows refuses query access to it.
+pub fn process_name(pid: u32) -> Option<String> {
+    // SAFETY: query-only permissions; a null handle is rejected and a valid one is closed.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let _owner = OwnedHandle(handle);
+    let mut buffer = [0u16; 32768];
+    let mut size = buffer.len() as u32;
+    // SAFETY: the buffer holds `size` UTF-16 elements and the handle grants query access.
+    if unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size) } == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..size as usize]))
+}
 pub fn process_names() -> Result<HashMap<u32, String>> {
     // SAFETY: documented flag with no PID restriction.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
@@ -531,5 +561,20 @@ mod native_probe {
             println!("Helium executable metadata: {label}");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod process_name_tests {
+    use super::*;
+
+    #[test]
+    fn a_running_process_is_named_at_once_and_a_missing_one_is_not() {
+        let own = process_name(std::process::id()).expect("this process can be queried");
+        assert!(
+            own.to_lowercase().ends_with(".exe"),
+            "Expected a full image path: {own}"
+        );
+        assert!(process_name(u32::MAX - 3).is_none());
     }
 }

@@ -91,7 +91,14 @@ impl MonitorApp {
                                     }
                                 }
                                 if totals.is_empty() {
-                                    widgets::empty_state(ui, "No matching app traffic yet.");
+                                    widgets::empty_state(
+                                        ui,
+                                        if self.data.history_revision == self.filter_revision {
+                                            "No matching app traffic yet."
+                                        } else {
+                                            "Loading usage…"
+                                        },
+                                    );
                                 }
                             });
                     });

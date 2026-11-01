@@ -16,7 +16,7 @@ impl std::fmt::Display for NewerVersion {
 }
 impl std::error::Error for NewerVersion {}
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Sets a database that cannot be opened aside, together with its WAL and shared
 /// memory files, so a fresh one can take its place without destroying anything.
@@ -61,13 +61,13 @@ impl Store {
         }
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+            PRAGMA journal_size_limit=67108864;
             CREATE TABLE IF NOT EXISTS traffic (
             minute INTEGER NOT NULL, source TEXT NOT NULL, adapter_id TEXT NOT NULL,
             adapter TEXT NOT NULL, app TEXT NOT NULL, pid INTEGER NOT NULL, remote TEXT NOT NULL,
             country TEXT NOT NULL, protocol TEXT NOT NULL, scope TEXT NOT NULL,
             down INTEGER NOT NULL, up INTEGER NOT NULL, traffic_type TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(minute,source,adapter_id,app,pid,remote,protocol,scope,traffic_type));
-            CREATE INDEX IF NOT EXISTS traffic_time_source ON traffic(source,minute);
             CREATE TABLE IF NOT EXISTS visible_adapters (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', last_seen INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS adapter_samples (
                 timestamp INTEGER NOT NULL, adapter_id TEXT NOT NULL,
@@ -75,6 +75,13 @@ impl Store {
                 PRIMARY KEY(timestamp,adapter_id));
             ",
         )?;
+        // Older layouts get the time index their queries relied on until the last step
+        // below replaces the whole table; the current layout needs none.
+        if version < 6 {
+            db.execute_batch(
+                "CREATE INDEX IF NOT EXISTS traffic_time_source ON traffic(source,minute);",
+            )?;
+        }
         // A current database is checked in the background after launch, since the scan
         // grows with its size. One that is about to be migrated is checked first so
         // that damage is never rewritten into the new layout.
@@ -127,10 +134,29 @@ impl Store {
                 DROP TABLE adapter_samples_v4;")?;
         }
         tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS wifi_networks(id TEXT PRIMARY KEY,name TEXT NOT NULL);
-            PRAGMA user_version=5;",
+            "CREATE TABLE IF NOT EXISTS wifi_networks(id TEXT PRIMARY KEY,name TEXT NOT NULL);",
         )?;
+        if version < 5 {
+            tx.execute_batch("PRAGMA user_version=5;")?;
+        }
         tx.commit()?;
+        if version < 6 {
+            // Lead the key with source and minute and drop the separate rowid table and
+            // time index: every period query is a range over exactly those two columns,
+            // and the key was otherwise stored a second and third time.
+            let tx = db.transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE traffic RENAME TO traffic_v5;
+                CREATE TABLE traffic(minute INTEGER NOT NULL,source TEXT NOT NULL,adapter_id TEXT NOT NULL,adapter TEXT NOT NULL,app TEXT NOT NULL,pid INTEGER NOT NULL,remote TEXT NOT NULL,country TEXT NOT NULL,protocol TEXT NOT NULL,scope TEXT NOT NULL,down INTEGER NOT NULL,up INTEGER NOT NULL,traffic_type TEXT NOT NULL DEFAULT '',wifi_network TEXT NOT NULL DEFAULT '',PRIMARY KEY(source,minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network)) WITHOUT ROWID;
+                INSERT INTO traffic SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network FROM traffic_v5 ORDER BY source,minute;
+                DROP TABLE traffic_v5;
+                PRAGMA user_version=6;",
+            )?;
+            tx.commit()?;
+            // The old table's pages are now free but the file would keep its size. Give
+            // them back once, here; failing to is harmless, they are reused by new data.
+            let _ = db.execute_batch("VACUUM;");
+        }
         Ok(Self { db })
     }
     /// Scans the file for damage. Slow on a large history, so not part of `open`.
@@ -260,10 +286,10 @@ impl Store {
                 continue;
             }
             let point = points.entry(minute).or_default();
-            point.0 += row.down;
-            point.1 += row.up;
-            result.down += row.down;
-            result.up += row.up;
+            point.0 = point.0.saturating_add(row.down);
+            point.1 = point.1.saturating_add(row.up);
+            result.down = result.down.saturating_add(row.down);
+            result.up = result.up.saturating_add(row.up);
             let key = (
                 row.adapter_id.clone(),
                 row.app.clone(),
@@ -279,8 +305,8 @@ impl Store {
                 up: 0,
                 ..row.clone()
             });
-            item.down += row.down;
-            item.up += row.up;
+            item.down = item.down.saturating_add(row.down);
+            item.up = item.up.saturating_add(row.up);
         }
         let mut series: Vec<(i64, u64, u64, f64, i64)> = Vec::new();
         let mut raw_minutes = std::collections::HashSet::new();
@@ -544,7 +570,7 @@ impl Store {
     }
 }
 fn write_rows(tx: &rusqlite::Transaction<'_>, timestamp: i64, rows: &[UsageRow]) -> Result<()> {
-    let mut stmt=tx.prepare_cached("INSERT INTO traffic(minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(minute,source,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=excluded.country,adapter=excluded.adapter")?;
+    let mut stmt=tx.prepare_cached("INSERT INTO traffic(minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(source,minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=excluded.country,adapter=excluded.adapter")?;
     for r in rows {
         stmt.execute(params![
             timestamp / 60 * 60,
@@ -600,8 +626,15 @@ fn plot_series(mut rows: Vec<(i64, u64, u64, f64, i64)>, start: i64, end: i64) -
     }
     result
 }
+/// Keeps spreadsheets from running a cell as a formula. Excel ignores leading
+/// whitespace and also treats the full-width forms and `|` as formula starts.
 fn csv_safe(value: &str) -> String {
-    if value.starts_with(['=', '+', '-', '@', '\t', '\r', '\n']) {
+    const FORMULA_STARTS: [char; 9] = ['=', '+', '-', '@', '|', '＝', '＋', '－', '＠'];
+    let risky = value.starts_with(['\t', '\r', '\n'])
+        || value
+            .trim_start()
+            .starts_with(|first| FORMULA_STARTS.contains(&first));
+    if risky {
         format!("'{value}")
     } else {
         value.into()
@@ -671,6 +704,11 @@ mod tests {
     fn spreadsheet_formulas_escaped() {
         assert_eq!(csv_safe("=bad"), "'=bad");
         assert_eq!(csv_safe("app.exe"), "app.exe");
+        for risky in [" =SUM(A1)", "|calc", "＝1+1", "\u{a0}@cmd", "\t=x", "－5"] {
+            assert_eq!(csv_safe(risky), format!("'{risky}"), "{risky:?}");
+        }
+        assert_eq!(csv_safe("a=b"), "a=b");
+        assert_eq!(csv_safe("  plain"), "  plain");
     }
 }
 
@@ -1082,7 +1120,7 @@ mod service_history_tests {
             store
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-            5
+            6
         );
         assert_eq!(
             store
@@ -1194,7 +1232,7 @@ mod wifi_history_tests {
             store
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-            5
+            6
         );
         assert_eq!(
             store
@@ -1604,6 +1642,121 @@ mod recovery_tests {
         store.integrity_check()?;
         let reader = store.open_reader()?.expect("file database");
         reader.integrity_check()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn table_sql(db: &Connection) -> Result<String> {
+        Ok(db.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='traffic'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+    fn indexes(db: &Connection) -> Result<Vec<String>> {
+        let mut stmt = db.prepare(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='traffic' AND sql IS NOT NULL",
+        )?;
+        Ok(stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    #[test]
+    fn a_v5_history_is_rewritten_compactly_without_losing_or_duplicating_rows() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        {
+            let old = Connection::open(&path)?;
+            old.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                CREATE TABLE traffic(minute INTEGER NOT NULL,source TEXT NOT NULL,adapter_id TEXT NOT NULL,adapter TEXT NOT NULL,app TEXT NOT NULL,pid INTEGER NOT NULL,remote TEXT NOT NULL,country TEXT NOT NULL,protocol TEXT NOT NULL,scope TEXT NOT NULL,down INTEGER NOT NULL,up INTEGER NOT NULL,traffic_type TEXT NOT NULL DEFAULT '',wifi_network TEXT NOT NULL DEFAULT '',PRIMARY KEY(minute,source,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network));
+                CREATE INDEX traffic_time_source ON traffic(source,minute);
+                CREATE TABLE adapter_samples(timestamp INTEGER NOT NULL,adapter_id TEXT NOT NULL,down INTEGER NOT NULL,up INTEGER NOT NULL,elapsed REAL NOT NULL,wifi_network TEXT NOT NULL DEFAULT '',PRIMARY KEY(timestamp,adapter_id,wifi_network));
+                CREATE TABLE visible_adapters(id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', last_seen INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE wifi_networks(id TEXT PRIMARY KEY,name TEXT NOT NULL);
+                INSERT INTO traffic VALUES(600,'transport','eth','Ethernet','browser.exe',42,'1.1.1.1','DE','TCP','WAN',100,20,'Web','');
+                INSERT INTO traffic VALUES(660,'adapter','eth','Ethernet','',0,'','','','Unknown',70,7,'','ssid:61');
+                PRAGMA user_version=5;",
+            )?;
+        }
+        let store = Store::open(&path)?;
+        let sql = table_sql(&store.db)?;
+        assert!(sql.contains("WITHOUT ROWID"), "{sql}");
+        assert!(
+            indexes(&store.db)?.is_empty(),
+            "The separate time index is gone"
+        );
+        let (rows, down): (i64, i64) =
+            store
+                .db
+                .query_row("SELECT COUNT(*), SUM(down) FROM traffic", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?;
+        assert_eq!((rows, down), (2, 170));
+        let leftover: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'traffic_v%'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(leftover, 0, "No old copy of the table is kept");
+        let free: i64 = store
+            .db
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        assert_eq!(free, 0, "The space of the old table is returned");
+
+        // Writing the same minute again still adds to the existing row.
+        let mut store = store;
+        store.write(
+            600,
+            &[UsageRow {
+                source: "transport".into(),
+                adapter_id: "eth".into(),
+                adapter: "Ethernet".into(),
+                app: "browser.exe".into(),
+                pid: 42,
+                remote: "1.1.1.1".into(),
+                protocol: "TCP".into(),
+                scope: "WAN".into(),
+                traffic_type: "Web".into(),
+                down: 5,
+                ..Default::default()
+            }],
+        )?;
+        let down: i64 =
+            store
+                .db
+                .query_row("SELECT down FROM traffic WHERE minute=600", [], |r| {
+                    r.get(0)
+                })?;
+        assert_eq!(down, 105);
+        drop(store);
+
+        // Reopening a current history changes nothing and does not bring the index back.
+        let store = Store::open(&path)?;
+        assert!(indexes(&store.db)?.is_empty());
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            6
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_fresh_history_starts_in_the_compact_layout_and_limits_its_journal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("usage.db"))?;
+        assert!(table_sql(&store.db)?.contains("WITHOUT ROWID"));
+        let limit: i64 = store
+            .db
+            .query_row("PRAGMA journal_size_limit", [], |r| r.get(0))?;
+        assert_eq!(limit, 67_108_864);
         Ok(())
     }
 }

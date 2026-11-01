@@ -20,7 +20,79 @@ use std::{
 };
 use windows_sys::Win32::System::Diagnostics::Etw::{
     CONTROLTRACE_HANDLE, ControlTraceW, EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_PROPERTIES,
+    QueryAllTracesW,
 };
+
+const SESSION_PREFIX: &str = "OpenNetworkMonitor-";
+
+/// The process id in the name of a session this app created, if `name` is one.
+fn session_owner(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(SESSION_PREFIX)?;
+    let (pid, started) = rest.split_once('-')?;
+    if started.is_empty() || !started.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Names of every running trace session.
+fn session_names() -> Vec<String> {
+    const MAX_SESSIONS: usize = 64;
+    const NAME_UNITS: usize = 1024;
+    #[repr(C)]
+    struct Properties {
+        props: EVENT_TRACE_PROPERTIES,
+        logger: [u16; NAME_UNITS],
+        file: [u16; NAME_UNITS],
+    }
+    // SAFETY: EVENT_TRACE_PROPERTIES and the name arrays are plain data; zero is valid.
+    let mut buffers: Vec<Properties> = (0..MAX_SESSIONS)
+        .map(|_| unsafe { std::mem::zeroed() })
+        .collect();
+    for buffer in &mut buffers {
+        buffer.props.Wnode.BufferSize = std::mem::size_of::<Properties>() as u32;
+        buffer.props.LoggerNameOffset = std::mem::offset_of!(Properties, logger) as u32;
+        buffer.props.LogFileNameOffset = std::mem::offset_of!(Properties, file) as u32;
+    }
+    let mut pointers: Vec<*mut EVENT_TRACE_PROPERTIES> = buffers
+        .iter_mut()
+        .map(|buffer| std::ptr::addr_of_mut!(buffer.props))
+        .collect();
+    let mut count = 0u32;
+    // SAFETY: the array holds MAX_SESSIONS pointers to properties blocks that each have
+    // room for a logger and a file name, as their offsets declare.
+    let code = unsafe { QueryAllTracesW(pointers.as_mut_ptr(), MAX_SESSIONS as u32, &mut count) };
+    if code != 0 {
+        return Vec::new();
+    }
+    buffers
+        .iter()
+        .take(count as usize)
+        .map(|buffer| {
+            let length = buffer
+                .logger
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(NAME_UNITS);
+            String::from_utf16_lossy(&buffer.logger[..length])
+        })
+        .collect()
+}
+
+/// Stops sessions left behind by earlier copies of this app that crashed or were
+/// killed. Only sessions named for a process that no longer exists are touched, so
+/// another program's sessions, and any live copy's, are never stopped.
+fn stop_abandoned_sessions() -> usize {
+    session_names()
+        .into_iter()
+        .filter(|name| {
+            session_owner(name).is_some_and(|pid| {
+                pid != std::process::id() && crate::capture::process_is_gone(pid)
+            })
+        })
+        .filter(|name| stop_trace_by_name(name).is_ok())
+        .count()
+}
 
 // ProcessTrace converts timestamps to UTC FILETIME because RAW_TIMESTAMP is not set.
 // FerrisETW 1.2 FileTime::as_quad incorrectly repeats the high DWORD; use the intact raw value.
@@ -116,6 +188,8 @@ fn callback(
 }
 impl EtwCapture {
     pub fn start() -> Result<Self> {
+        // A leftover session still holds kernel buffers, and Windows allows few sessions.
+        stop_abandoned_sessions();
         let (tx, events) = sync_channel(65_536);
         let stats = Arc::new(CaptureStats::default());
         let tcp = Provider::kernel(&TCP_IP_PROVIDER)
@@ -211,6 +285,35 @@ impl Drop for EtwCapture {
 #[cfg(test)]
 mod time_tests {
     use super::*;
+    #[test]
+    fn only_this_apps_own_session_names_identify_an_owner() {
+        assert_eq!(
+            session_owner("OpenNetworkMonitor-4242-1761993600123"),
+            Some(4242)
+        );
+        for other in [
+            "NT Kernel Logger",
+            "OpenNetworkMonitor-",
+            "OpenNetworkMonitor-abc-123",
+            "OpenNetworkMonitor-42",
+            "OpenNetworkMonitor-42-",
+            "OpenNetworkMonitor-42-12x",
+            "Other-42-123",
+        ] {
+            assert_eq!(session_owner(other), None, "{other}");
+        }
+    }
+    #[test]
+    fn this_process_is_not_gone_and_an_impossible_one_is() {
+        assert!(!crate::capture::process_is_gone(std::process::id()));
+        assert!(crate::capture::process_is_gone(u32::MAX - 3));
+    }
+    #[test]
+    fn listing_sessions_does_not_need_administrator_rights_to_fail_cleanly() {
+        // Succeeds with a (possibly empty) list, or returns empty when access is denied.
+        let names = session_names();
+        assert!(names.iter().all(|name| !name.contains('\0')));
+    }
     #[test]
     fn tcp_send_and_receive_keep_socket_addresses_and_ports() {
         let local: IpAddr = "192.168.1.3".parse().unwrap();

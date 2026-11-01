@@ -51,6 +51,7 @@ fn fixture() -> MonitorApp {
         app_cache_key: None,
         history_totals: Default::default(),
         dialogs: Default::default(),
+        connection_cache: Default::default(),
         breakdown_cache: Arc::default(),
         breakdown_cache_key: None,
         host_request: None,

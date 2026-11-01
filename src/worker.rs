@@ -166,6 +166,12 @@ fn read_histories(
     };
     Ok((history, summary))
 }
+fn export_message(store: &Store, path: &std::path::Path, filter: &Filter, now: i64) -> String {
+    match store.export(path, filter, now) {
+        Ok(n) => format!("Exported {n} rows to {}", path.display()),
+        Err(e) => format!("Export failed: {e:#}"),
+    }
+}
 struct HistoryRequest {
     filter: Filter,
     known: HashSet<String>,
@@ -493,6 +499,9 @@ fn run(
     let mut previous_wifi = HashMap::<String, String>::new();
     let mut previous = HashMap::<String, (u64, u64)>::new();
     let mut names = HashMap::new();
+    // Processes that could not be named since the last full refresh; asking again
+    // for every event of a process that already exited would waste the tick.
+    let mut unnameable = HashSet::<u32>::new();
     let mut labels = HashMap::new();
     let mut connections = Vec::new();
     let mut visible = HashSet::new();
@@ -571,15 +580,24 @@ fn run(
                     refresh = true;
                 }
                 Command::Export(path, f) => {
-                    let msg = match store.export(
-                        &path,
-                        &effective_filter(&f, &known),
-                        chrono::Utc::now().timestamp(),
-                    ) {
-                        Ok(n) => format!("Exported {n} rows to {}", path.display()),
-                        Err(e) => format!("Export failed: {e:#}"),
-                    };
-                    notice(&shared, msg);
+                    let filter = effective_filter(&f, &known);
+                    let now = chrono::Utc::now().timestamp();
+                    // Writing a long history to disk takes seconds; keep it off the
+                    // collector so capture is not starved meanwhile.
+                    let background = store.open_reader().ok().flatten().and_then(|reader| {
+                        let (shared, ctx, path) = (shared.clone(), ctx.clone(), path.clone());
+                        let filter = filter.clone();
+                        thread::Builder::new()
+                            .name("csv-export".into())
+                            .spawn(move || {
+                                notice(&shared, export_message(&reader, &path, &filter, now));
+                                ctx.request_repaint();
+                            })
+                            .ok()
+                    });
+                    if background.is_none() {
+                        notice(&shared, export_message(&store, &path, &filter, now));
+                    }
                 }
                 Command::Geo(path) => {
                     notice(
@@ -696,6 +714,7 @@ fn run(
                             labels.extend(capture::process_labels(&n));
                         }
                         names = n;
+                        unnameable.clear();
                     }
                     Err(e) => snapshot.warnings.push(e.to_string()),
                 }
@@ -814,6 +833,18 @@ fn run(
                 let traffic_type =
                     crate::traffic::classify(event.protocol, event.local_port, event.remote_port)
                         .to_owned();
+                // A process that started and finished between two refreshes is not in
+                // `names`; ask Windows now, while it may still be running.
+                if !names.contains_key(&event.pid) && !unnameable.contains(&event.pid) {
+                    match capture::process_name(event.pid) {
+                        Some(found) => {
+                            names.insert(event.pid, found);
+                        }
+                        None => {
+                            unnameable.insert(event.pid);
+                        }
+                    }
+                }
                 let key = (
                     event.timestamp / 60 * 60,
                     adapter_id.to_owned(),
@@ -841,8 +872,8 @@ fn run(
                     scope: scope.key().into(),
                     ..Default::default()
                 });
-                row.down += event.down;
-                row.up += event.up;
+                row.down = row.down.saturating_add(event.down);
+                row.up = row.up.saturating_add(event.up);
             }
             if !storage_failed {
                 pending

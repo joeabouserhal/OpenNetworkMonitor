@@ -184,15 +184,34 @@ fn should_replace(running: Option<u64>, own: u64) -> bool {
     running.is_none_or(|running| own > running)
 }
 
-/// Seconds since the epoch at which this executable was last written, so a fresh build
-/// outranks the copy it replaces.
+/// Orders builds by release version first and by when the executable was written second,
+/// so a rebuilt older release can never replace a newer one. The version sits above the
+/// low 32 bits that hold the time, which keeps the stamp a plain number: copies from
+/// before versions were included only ever stored the time, so they rank below any
+/// versioned build and read this one as a newer build to leave alone.
+fn compose_stamp(version: (u64, u64, u64), modified: u64) -> u64 {
+    let key = (version.0 * 1_000_000 + version.1 * 1_000 + version.2).min(u64::from(u32::MAX) >> 1);
+    (key << 32) | modified.min(u64::from(u32::MAX))
+}
+
 fn build_stamp() -> u64 {
-    std::env::current_exe()
+    let part = |text: &str| text.parse().unwrap_or(0);
+    let version = (
+        part(env!("CARGO_PKG_VERSION_MAJOR")),
+        part(env!("CARGO_PKG_VERSION_MINOR")),
+        part(env!("CARGO_PKG_VERSION_PATCH")),
+    );
+    let modified = std::env::current_exe()
         .and_then(|path| path.metadata())
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |elapsed| elapsed.as_secs())
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if modified == 0 {
+        0
+    } else {
+        compose_stamp(version, modified)
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +222,34 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         mpsc,
     };
+
+    #[test]
+    fn a_newer_release_outranks_a_later_build_of_an_older_one() {
+        let old_release_rebuilt_today = compose_stamp((0, 3, 4), 1_900_000_000);
+        let new_release_built_last_week = compose_stamp((0, 4, 0), 1_800_000_000);
+        assert!(should_replace(
+            Some(old_release_rebuilt_today),
+            new_release_built_last_week
+        ));
+        assert!(!should_replace(
+            Some(new_release_built_last_week),
+            old_release_rebuilt_today
+        ));
+        // Same release: the later build wins, as before.
+        assert!(should_replace(
+            Some(compose_stamp((0, 4, 0), 100)),
+            compose_stamp((0, 4, 0), 200)
+        ));
+        // Stamps written before versions were included rank below every versioned one.
+        assert!(should_replace(
+            Some(1_900_000_000),
+            new_release_built_last_week
+        ));
+        assert!(!should_replace(
+            Some(new_release_built_last_week),
+            1_900_000_000
+        ));
+    }
 
     fn names(tag: &str) -> Names {
         let owner =

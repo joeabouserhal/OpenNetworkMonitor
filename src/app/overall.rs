@@ -292,7 +292,16 @@ Captured TCP/UDP app traffic in the selected period and adapters.",
         }
         if self.data.top_apps.is_empty() {
             ui.add_space(4.0);
-            ui.label(RichText::new("No app traffic recorded").size(13.5).weak());
+            let loading = self.data.history_revision != self.filter_revision;
+            ui.label(
+                RichText::new(if loading {
+                    "Loading usage…"
+                } else {
+                    "No app traffic recorded"
+                })
+                .size(13.5)
+                .weak(),
+            );
         }
     }
 }

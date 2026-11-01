@@ -86,6 +86,12 @@ impl Page {
         }
     }
 }
+/// The filtered Connections list, remembered until a new snapshot or search.
+#[derive(Default)]
+struct ConnectionCache {
+    key: Option<(u64, String)>,
+    rows: Arc<Vec<(usize, String)>>,
+}
 /// History bytes per app, remembered until the next history load.
 #[derive(Default)]
 struct HistoryTotals {
@@ -132,6 +138,7 @@ pub struct MonitorApp {
     /// Per-app byte totals of the loaded history, which only change with a new load.
     history_totals: HistoryTotals,
     dialogs: dialogs::FileDialogs,
+    connection_cache: ConnectionCache,
     breakdown_cache: Arc<Breakdown>,
     breakdown_cache_key: Option<(u64, u64, u64, String, Option<String>)>,
     host_request: Option<Instant>,
@@ -216,6 +223,7 @@ impl MonitorApp {
             app_cache_key: None,
             history_totals: HistoryTotals::default(),
             dialogs: dialogs::FileDialogs::default(),
+            connection_cache: ConnectionCache::default(),
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
             host_request: None,
@@ -266,7 +274,15 @@ impl MonitorApp {
             }
         }
         let _ = self.worker.tx.send(Command::Export(path, filter));
-        self.data.notice = "Preparing export…".into();
+        self.set_notice("Preparing export…");
+    }
+    /// Shows a message in the banner. It goes through the shared state as well, since
+    /// the window copies that over its own every time it changes.
+    fn set_notice(&mut self, text: &str) {
+        self.data.notice = text.to_owned();
+        if let Ok(mut state) = self.worker.shared.lock() {
+            state.notice = text.to_owned();
+        }
     }
     fn use_country_database(&mut self, path: PathBuf) {
         self.settings.geo = Some(path.clone());

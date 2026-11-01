@@ -20,27 +20,43 @@ pub(super) fn connection_columns(rect: Rect) -> [Rect; 6] {
 }
 
 impl MonitorApp {
+    /// Connections matching the search, as positions in the snapshot with their display
+    /// names. Rebuilt when a new snapshot or a different search arrives, not on every
+    /// frame, since the text search formats and lowercases a string per connection.
+    fn visible_connections(&mut self) -> Arc<Vec<(usize, String)>> {
+        let key = (self.data.revision, self.connection_search.clone());
+        if self.connection_cache.key.as_ref() != Some(&key) {
+            let search = self.connection_search.to_lowercase();
+            let rows: Vec<_> = self
+                .data
+                .snapshot
+                .connections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, c)| {
+                    let name = self.label(&c.app);
+                    (search.is_empty()
+                        || format!(
+                            "{name} {} {} {} {} {} {}",
+                            c.app, c.pid, c.local, c.remote, c.state, c.country
+                        )
+                        .to_lowercase()
+                        .contains(&search))
+                    .then_some((index, name))
+                })
+                .collect();
+            self.connection_cache = ConnectionCache {
+                key: Some(key),
+                rows: Arc::new(rows),
+            };
+        }
+        self.connection_cache.rows.clone()
+    }
     pub(super) fn connections(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
         ui.spacing_mut().item_spacing.y = 0.0;
-        let search = self.connection_search.to_lowercase();
-        let rows: Vec<_> = self
-            .data
-            .snapshot
-            .connections
-            .iter()
-            .filter_map(|c| {
-                let name = self.label(&c.app);
-                (search.is_empty()
-                    || format!(
-                        "{name} {} {} {} {} {} {}",
-                        c.app, c.pid, c.local, c.remote, c.state, c.country
-                    )
-                    .to_lowercase()
-                    .contains(&search))
-                .then_some((c, name))
-            })
-            .collect();
+        let snapshot = self.data.snapshot.clone();
+        let rows = self.visible_connections();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             let width = (ui.available_width() - 100.0).clamp(180.0, 520.0);
@@ -51,13 +67,9 @@ impl MonitorApp {
                 width,
             );
             ui.label(
-                RichText::new(format!(
-                    "{} of {}",
-                    rows.len(),
-                    self.data.snapshot.connections.len()
-                ))
-                .size(13.5)
-                .weak(),
+                RichText::new(format!("{} of {}", rows.len(), snapshot.connections.len()))
+                    .size(13.5)
+                    .weak(),
             );
         });
         ui.add_space(14.0);
@@ -96,7 +108,8 @@ impl MonitorApp {
                     .auto_shrink([false, false])
                     .max_height(ui.available_height())
                     .show_rows(ui, CONNECTION_ROW_HEIGHT, rows.len(), |ui, range| {
-                        for (c, name) in &rows[range] {
+                        for (index, name) in &rows[range] {
+                            let c = &snapshot.connections[*index];
                             let icon = self.icons.texture(ui.ctx(), &c.app);
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), CONNECTION_ROW_HEIGHT),

@@ -200,8 +200,12 @@ impl MonitorApp {
             widgets::message(ui, &self.view_warning, true, false);
         }
         if !self.data.notice.is_empty() && widgets::message(ui, &self.data.notice, false, true) {
-            self.data.notice.clear();
-            if let Ok(mut state) = self.worker.shared.lock() {
+            // Only clear the worker's copy if it is still the message that was dismissed;
+            // a newer one may have arrived since it was drawn.
+            let dismissed = std::mem::take(&mut self.data.notice);
+            if let Ok(mut state) = self.worker.shared.lock()
+                && state.notice == dismissed
+            {
                 state.notice.clear();
             }
         }
