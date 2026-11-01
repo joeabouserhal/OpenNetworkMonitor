@@ -1,91 +1,216 @@
 # OpenNetworkMonitor
 
-A local-first Windows network monitor written in Rust with egui. No subscription, telemetry, account, Npcap installation, or Windows Data Usage service is required.
+A local-first network monitor for Windows, written in Rust with [egui](https://github.com/emilk/egui).
 
-**Status:** working first implementation, not a finished GlassWire replacement. VPN-specific measurement still needs real-device validation.
+No subscription, telemetry, account, Npcap install, or Windows Data Usage service required. Everything stays on your PC.
 
-## Run
+> **Status:** a working first implementation, not yet a finished GlassWire replacement. VPN measurements still need validation on real devices.
 
-Use Windows with Rust 1.95+ (MSVC toolchain) and Visual Studio C++ Build Tools. From the project folder:
+![Overall traffic](screenshots/overview.png)
+
+<sub>Screenshots use generated sample data.</sub>
+
+---
+
+## Contents
+
+- [Features](#features)
+- [Quick start](#quick-start)
+- [How the numbers work](#how-the-numbers-work)
+- [Diagnostics and verification](#diagnostics-and-verification)
+- [Storage reliability](#storage-reliability)
+- [UI development](#ui-development)
+- [Documentation](#documentation)
+- [Sources and license](#sources-and-license)
+
+---
+
+## Features
+
+### Traffic views
+
+- **Overview** has two modes, **Overall Traffic** and **App traffic**. Both share matching period and adapter dropdowns.
+  - The chart uses smooth curves within the selected period. Recorded samples stay exact, and unrecorded gaps stay blank.
+  - Overall Traffic shows a **top five apps** footer and a LAN/WAN breakdown.
+  - App traffic adds a network dropdown and search, plus a download/upload summary with a proportional bar.
+- **Three ranked lists** in App traffic: **Apps**, **Hosts**, and **Traffic type**. Each is sorted by combined upload and download. Selecting an app filters the other two lists. Select it again, or choose All apps, to clear.
+- **Per-app history.** Selecting an app adds a bar chart of its usage:
+  - **Over time** follows the selected period.
+  - **Daily** always shows the last 30 calendar days.
+  - **Monthly** always shows the last 12 months.
+- **Wi-Fi filtering.** The Adapters menu lets you filter recorded traffic by Wi-Fi network name. It works with the period, adapter, and network filters, and carries into CSV exports.
+- **Hosts and traffic types.** Host names come from reverse DNS through your Windows resolver, with IP fallback. Traffic types (HTTP, HTTPS/TLS, DNS, QUIC, and others) are estimated from ports. No payloads are inspected or decrypted.
+- **Country lookup (optional).** Point the app at your own GeoLite2/GeoIP2 Country or City `.mmdb` file. No database is bundled, and lookups never go online.
+
+### Connections
+
+- A live table of TCP connections and UDP sockets, with process names, endpoints, protocol, and state.
+- Sortable columns, Protocol and Status filters, and resolved host names for public addresses.
+- Right-click to copy addresses or details, show only one app, open the file location, or end the process (after confirmation).
+
+### Adapters
+
+- Shows the same present, visible adapters that Windows does, including disconnected Ethernet, Wi-Fi, and VPN adapters.
+- Usage is kept per adapter, even after it's unplugged.
+- Opening an adapter from here jumps straight to it in Overview.
+
+### Alerts and limits
+
+- **New app alert:** a notification the first time an app uses the network.
+- **Monthly data cap:** set a reset day. The app warns at 80% and again when the cap is used up.
+- Alerts show as Windows notifications and as an in-app banner. The cap meter appears in Settings and the sidebar.
+
+### Look and feel
+
+- A modern, minimal design with tonal cards, pill filters, and popovers.
+- Themes: **Slate** (default dark), **Light**, **Nord**, and **Catppuccin Mocha**. **Match Windows appearance** switches between Slate and Light with your system setting.
+- Colour is reserved for data: download is blue, upload is orange. On Windows 11 the title bar matches the theme.
+- Interface size is adjustable from 80% to 110% in **Settings → Appearance** (default 90%).
+- Sidebar with Overview, Connections, Adapters, and Settings. In narrow windows it becomes an icon rail.
+- Screen-reader labels on painted figures, the chart, and Connections rows.
+
+### Background and tray
+
+- **Tray menu:** Open, Open Settings, **Pause recording** (the live display continues, nothing is saved), and Exit. The tooltip shows live speeds.
+- **Launch when I sign in:** in **Settings → Background monitoring**. It starts in the tray using your elevated session and a per-user scheduled task. The option only appears when the app is in a folder ordinary programs can't change, such as Program Files, and it can be turned off in the same place.
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+1` to `Ctrl+4` | Switch page |
+| `Ctrl+F` | Focus search |
+| `Ctrl+E` | Export CSV |
+| `Esc` | Clear the selected app |
+
+### Export and history
+
+- **CSV export** of the current filters, including any app search or selected app. Timestamps are UTC, byte counts are raw, and existing files are never overwritten.
+- **History** is saved in SQLite at `%LOCALAPPDATA%\OpenNetworkMonitor\usage.db`, in minute-level buckets, with no automatic expiry.
+- **Saved settings:** theme, filters, units, alert choices, country database path, window state, and close-to-tray preference.
+
+### Reliability
+
+- Single-instance lock.
+- Capture errors and loss counters are shown in the UI.
+- Bounded event queue and country cache.
+- Storage retries, and a background worker that runs separately from rendering.
+
+---
+
+## Quick start
+
+You need Windows, Rust 1.95+ (MSVC toolchain), and Visual Studio C++ Build Tools.
+
+From the project folder, run one of:
 
 ```powershell
 .\build.ps1
-# Or from Command Prompt:
+# or, from Command Prompt:
 .\build.cmd
 ```
 
-The script runs formatting, tests and strict Clippy, builds the release, and creates a versioned app folder, ZIP and SHA-256 checksum under `dist/`. It preserves an in-use build without terminating the running monitor. Opening a newer build while an older copy runs asks that copy to save its data and exit, then takes over; if the older copy predates that hand-over, exit it from its tray first. Compilation does not require administrator access.
+The script checks formatting, runs tests and strict Clippy, builds a release, and packages it under `dist/` as a versioned app folder, a ZIP, and a SHA-256 checksum.
 
-For a faster rebuild after checks have already passed, use `.\build.ps1 -SkipChecks`. For a debug package, use `.\build.ps1 -Configuration Debug`. The script uses only project-local output folders and does not install toolchains or change system configuration. The Command Prompt wrapper's execution-policy setting applies only to its PowerShell process.
+**Handy options**
 
-You can also use Cargo directly:
+| Command | What it does |
+| --- | --- |
+| `.\build.ps1 -SkipChecks` | Rebuild quickly once checks have already passed |
+| `.\build.ps1 -Configuration Debug` | Build a debug package |
+
+The script only writes to project-local folders. It doesn't install toolchains or change system settings. Compiling doesn't need administrator access.
+
+<details>
+<summary>Using Cargo directly</summary>
 
 ```powershell
 cargo build --locked --release
 .\target\release\OpenNetworkMonitor.exe
 ```
 
-The executable now embeds an administrator requirement. Opening it requests Windows approval automatically, so detailed per-application monitoring starts with the required access. Build normally, then open the executable through Explorer; use an elevated terminal for `cargo run` or command-line diagnostics. The app does not install a driver, service, or firewall rule. Optional launch at sign-in can be enabled in Settings → Background monitoring. It uses a per-user Windows scheduled task so the app can start with the administrator access required for monitoring. Because that task runs elevated, the setting is only offered when the app sits in a folder that ordinary programs cannot change, such as Program Files; see [docs/UNINSTALL.md](docs/UNINSTALL.md) for the installer script.
+</details>
 
-Closing the window hides it to the system tray by default. Left-click the tray icon to reopen it; right-click → **Exit** hides the window immediately and stops the app after saving its final data. If creating the tray fails, closing the window exits instead. The process must remain running to record traffic.
+### Running it
 
-## Screenshots
+- **Launch it from Explorer.** The executable asks for administrator approval automatically, because per-application monitoring needs that access. Use an elevated terminal only for `cargo run` or command-line diagnostics.
+- **Only one copy runs at a time.** If you open a newer build while an older one is running, the older copy is asked to save and exit, and the new one takes over. If the older copy predates this hand-over, exit it from the tray first.
+- **Closing the window hides it to the tray.** Left-click the tray icon to reopen. Right-click → **Exit** saves final data and stops the app. If the tray can't be created, closing the window exits instead.
+- **The process must keep running to record traffic.**
+- **No driver, service, or firewall rule is installed.** Optional launch at sign-in lives in **Settings → Background monitoring** (see [Features](#features)). For the installer script, see [docs/UNINSTALL.md](docs/UNINSTALL.md).
 
-These previews use generated sample data.
+---
 
-![Overall traffic](screenshots/overview.png)
-![App traffic](screenshots/app-traffic.png)
-![Overall traffic, light theme](screenshots/overview-light.png)
+## How the numbers work
 
-## Implemented
+Different sources measure different things, so read this section before comparing figures.
 
-- Native live adapter counters for the same present, non-hidden interfaces shown by Windows, including real disconnected Ethernet, Wi-Fi and VPN adapters. Hidden/filter/loopback entries stay out of the visible inventory. A persistent catalog retains usage when an adapter is unplugged.
-- Native ETW kernel capture of TCP and UDP transfer events, IPv4 and IPv6, attributed using each event's payload PID.
-- Filter recorded Wi-Fi traffic by connection name from the Adapters menu in either traffic view. The selection works with period, adapter and network filters and applies to CSV exports.
-- Upload/download, LAN/WAN/Unknown classification, adapter association from the local address, and an explicit Unassigned category.
-- Two Overview buttons: **Overall Traffic** and **App traffic**. The compact adapter view fits its chart, compact upload/download summary and horizontal LAN/WAN breakdown without scrolling at the supported minimum window size. Its chart uses smooth, shape-preserving curves within exactly the selected usage period; recorded samples stay unchanged and unrecorded intervals remain blank. Both views use matching period and multi-adapter dropdowns; App traffic adds a network dropdown and search on the same line, followed by a compact total download/upload summary with a proportional bar below the lists. Advanced chart controls are tucked away.
-- The Overall Traffic footer includes the **top five apps** by combined upload/download, using the selected period and adapters. With All adapters selected, this matches App traffic and includes loopback and unattributed transfers. Totals and the LAN/WAN bar share a compact band without repeating the period. The default window is wider; existing windows widen once for this layout and then retain later resizing.
-- Dense 54-point rows in App traffic show Windows executable icons with a fallback when unavailable, alongside smaller directories/host/type descriptions and Down/Up figures. Overview omits the descriptive subtitle and the list omits the standing selection hint. Selected apps can be cleared from the Apps heading.
-- Three compact, independently scrolling columns: **Apps**, **Hosts** and **Traffic type**, each ranked by combined upload and download in the selected usage period. App names show the executable directory directly below; absent friendly metadata, the exact executable filename is kept. Selecting an app filters the adjacent lists; selecting it again or choosing All apps clears that selection. Live rates remain in app tooltips.
-- Background host-name resolution through the Windows system resolver, with IP fallback. Common traffic types (HTTP, HTTPS/TLS, DNS, QUIC and others) are inferred from connection ports and saved with history. No payload inspection or decryption is performed.
-- Live TCP connection and UDP socket inventory, process names, local/remote endpoints, protocol and state.
-- Optional offline country lookup from a user-supplied GeoLite2/GeoIP2 Country or City `.mmdb` file. No database is bundled and country lookup sends no online requests.
-- A compact 90% default interface size, adjustable from 80% to 110% in Settings → Appearance. The saved size applies throughout the app.
-- A modern, minimal interface: tonal cards, Segoe UI Semibold/Light typography, pill filters and popovers. **Slate** is the dark default, with Light, Nord and Catppuccin Mocha palettes. Colour is reserved for data (download blue, upload orange). On Windows 11 the title bar takes the theme colour too.
-- Four sidebar destinations: Overview, Connections, Adapters and Settings (the sidebar becomes an icon rail in narrow windows). App traffic lives in Overview. Ranked rows show Down/Up values and a slim usage bar, and a persistent monitoring status keeps navigation consistent.
-- A Connections table with PID/folder subtitles, resolved host names under public addresses, sortable column headers, Protocol and Status filters, and a right-click menu to copy addresses or details, show only one app, open its file location or end the process (after confirmation). Adapter actions align across rows and open the selected adapter directly in Overview. Settings are grouped into sections, with detailed measurement notes collapsed by default.
-- SQLite minute-level history kept indefinitely, stored in `%LOCALAPPDATA%\OpenNetworkMonitor\usage.db`.
-- CSV export of the current usage filters (including the app search or selected app), with UTC timestamps, raw byte counts and traffic types. Existing export files are not overwritten.
-- Optional **Launch when I sign in to Windows** in Settings → Background monitoring. It starts this copy in the system tray, uses the current user's elevated interactive session, and can be turned off from the same setting.
-- Selecting an app in App traffic adds a bar chart of its own usage. **Over time** follows the selected period; **Daily** always shows the last 30 calendar days and **Monthly** the last 12 months, whatever the period.
-- Optional alerts in Settings → Alerts: a notification the first time an app is seen using the network, and a monthly data cap with a configurable reset day that warns at 80% and when it is used up. Alerts appear as Windows notifications and as a banner; the cap meter is in Settings and the sidebar.
-- **Match Windows appearance** switches between Slate and Light with the system setting (on for new installs). Keyboard shortcuts: Ctrl+1 to Ctrl+4 change page, Ctrl+F focuses search, Ctrl+E exports, Esc clears the selected app.
-- Tray menu: Open, Open Settings, **Pause recording** (capture and the live display continue, nothing is saved) and Exit. The tray tooltip shows the live speeds.
-- Painted figures, the chart and Connections rows have labels for screen readers.
-- Persisted theme, filters, units, alert choices, country-database path, window state and close-to-tray preference.
-- Single-instance lock, visible capture errors and loss counters, bounded event queue and country cache, storage retries, background worker independent from rendering.
+### Overall Traffic (interface counters)
 
-## Understand the measurements
+- Uses `GetIfTable2` interface-counter deltas, sampled about once per second.
+- Does **not** use the Windows Settings → Data Usage store.
+- Counts all protocols on each interface.
+- Counters are baselined at startup, so traffic from before launch isn't imported. Resets and reconnects never create negative totals or spikes.
 
-**Overall Traffic** uses `GetIfTable2` interface-counter deltas, sampled approximately once per second. This does **not** use the historical Windows Settings → Data Usage/NDU store. It counts interface bytes across all protocols. Counters are baselined on startup; traffic before the app started is not imported. Resets and adapter reconnects do not create negative totals or wraparound spikes.
+### Wi-Fi connections
 
-**Wi-Fi connections** are grouped by their network name (SSID), including the same name seen on multiple adapters. The Adapters menu lists connections observed while the app is running and offers an Unidentified Wi-Fi option for observations that cannot be confidently assigned. Network changes between samples and Windows lookup failures can leave some traffic unidentified; a very brief switch between observations may not be detected. Past traffic recorded before this feature remains in all-connection totals but cannot be assigned to a specific network. App traffic is associated with a Wi-Fi connection only when its local address can be matched to a Wi-Fi adapter; VPN and other traffic that cannot be matched may be excluded from a named connection view. Wi-Fi names are stored locally in the usage database and retained in its catalog even after the corresponding usage history expires.
+- Grouped by network name (SSID), including the same name seen on several adapters.
+- The Adapters menu lists networks seen while the app is running, plus an **Unidentified Wi-Fi** option for traffic that can't be assigned with confidence.
+- Some traffic can stay unidentified: network switches between samples, Windows lookup failures, and very brief switches may not be detected.
+- Traffic recorded before this feature existed counts in all-connection totals but can't be assigned to a specific network.
+- Names are stored locally and kept in the catalog even after the matching history expires.
 
-**App traffic** uses built-in ETW kernel TCP/IP and UDP/IP send/receive events through FerrisETW. It does not require Npcap. App totals reflect observed TCP/UDP transport events, not every link-layer byte or protocol. ACK/connect/retransmit event types are not added as separate usage. If capture cannot start, the UI explains why; adapter traffic is still collected.
+### App traffic (ETW)
 
-The LAN/WAN bar summarizes captured TCP/UDP app traffic over the same selected adapter/history scope; its total is kept separate from interface-counter totals because the two measurements represent different layers. In App traffic mode, All adapters includes observed transport traffic including loopback; explicit adapter choices restrict it to those interfaces.
+- Uses built-in ETW kernel TCP/IP and UDP/IP send and receive events, through [FerrisETW](https://github.com/n4r1b/ferrisetw). Npcap isn't needed.
+- Totals reflect observed TCP and UDP transport events. They aren't every link-layer byte. ACK, connect, and retransmit events aren't counted as separate usage.
+- If capture can't start, the UI says why. Adapter traffic is still collected.
+- Each event is attributed using its payload PID.
+- Traffic is matched to a Wi-Fi network only when its local address matches a Wi-Fi adapter. VPN and other unmatched traffic may be left out of a named-network view.
+- **Friendly names** come from Windows FileDescription and ProductName resources. Browsers keep their brand even when the binary is named `chrome.exe`.
+- Process identities refresh every five seconds. A process that sends traffic between refreshes is named immediately while it's still running. A process that exits before lookup shows as `Process N`. PID reuse within one refresh interval is a known limitation.
 
-The two sources are **never added together**. Selecting every physical and virtual adapter is a sum of adapter observations, which may count the same traffic at several layers. VPN traffic may appear as inner application traffic and outer encrypted traffic belonging to a VPN process. This version does not claim a deduplicated all-PC internet total across arbitrary VPNs. Select a physical adapter for its observed wire traffic, or select particular application/transport views for their observed traffic. Validating the exact VPN stack is part of the next milestone.
+### LAN and WAN
 
-TCP downloads recorded before the receive-endpoint fix can have an incorrect destination, adapter, network classification and traffic type. The original remote endpoint was not saved, so these historical details cannot be reliably reconstructed; new traffic uses the corrected mapping.
+- **LAN** covers private, loopback, link-local, multicast, broadcast, and on-link destinations. **WAN** covers public destinations. Reserved and shared ranges are **Unknown**.
+- This is address-based, not proof of a routing boundary. Public destinations routed through a private gateway still count as WAN.
+- Adapter association comes from a unique local-address match. Ambiguous matches stay **Unassigned**.
+- The LAN/WAN bar uses captured TCP/UDP app traffic, so its total is kept apart from interface-counter totals. In App traffic mode, **All adapters** includes loopback.
 
-LAN includes private, loopback, link-local, multicast, broadcast and on-link destinations. WAN means public destinations; reserved/shared ranges are Unknown. This is an address-based classification, not proof of a routing boundary. Public destinations routed through a private gateway remain WAN. Adapter association is inferred from a unique local-address match; ambiguous matches remain Unassigned.
+### Combining sources and VPNs
 
-Socket tables expose TCP remote endpoints but not UDP destinations. Observed UDP destinations appear in the application history when ETW is active. Socket inventory is refreshed every five seconds independently of the usage filters. Friendly names come from Windows FileDescription/ProductName resources, so browsers such as Helium retain their brand even when the binary is named chrome.exe. Process identities are refreshed every five seconds, and a process that sends traffic between refreshes is named at once while it is still running. A process that exits before it can be looked up can still appear as Process N, and PID reuse inside the refresh interval is a known limitation.
+- The two sources are **never added together**.
+- Selecting every adapter sums observations that can count the same traffic at several layers.
+- VPN traffic can show up twice: as inner application traffic, and as outer encrypted traffic from the VPN process.
+- There's no deduplicated all-PC internet total across arbitrary VPNs in this version.
+- For clean numbers, select one physical adapter (its wire traffic), or a particular app or transport view. Validating the exact VPN stack is the next milestone.
 
-Host names use reverse DNS through your configured Windows resolver, on two background threads with bounded queues and caching. Requests occur for the displayed host list. Shared hosting/CDN names can differ from the website visited; IPs remain in subtitles or tooltips. Host-name resolution can generate ordinary DNS traffic. It does not contact a separate IP lookup service. Traffic-type labels are port-based estimates, so encrypted DNS carried on HTTPS ports appears as HTTPS/TLS. Existing history without recorded ports remains **Unclassified**, retaining its original byte counts.
+### Sockets and hosts
 
-History is stored in UTC minute buckets with no automatic expiry. Histories already deleted by older versions cannot be recovered. The chart follows the selected period, including 15m/30m, longer presets, Since beginning of month, All time, and custom rolling durations or date ranges. Month-to-date begins at local midnight on the first day and updates automatically when the month changes. The custom dialog has separate date/time fields and calendar popovers. Date ranges use local time and include the full ending minute; CSV timestamps remain UTC. Views up to 24 hours refresh every second; longer and all-time views refresh every five seconds. Recent adapter samples are stored for 24 hours and survive reopening; older history uses minute aggregates. Long ranges are downsampled for display. Missing samples produce gaps rather than invented zero traffic or lines across downtime. Period selection rounds down to a minute. Empty time spans stay empty on the graph. Measured zero traffic is still shown as zero. Freeze pauses the chart only; recording, range totals and live speed continue. Country lookup applies to newly captured traffic and is approximate.
+- TCP tables show remote endpoints. UDP tables don't, so observed UDP destinations appear in app history while ETW is active.
+- Socket inventory refreshes every five seconds, independent of your usage filters.
+- Host names use reverse DNS on two background threads with bounded queues and caching. Lookups only cover hosts on screen. Shared hosting and CDNs can show a different name from the site you visited. IP addresses stay in subtitles and tooltips.
+- Host lookups create ordinary DNS traffic. No separate IP lookup service is contacted.
+- Traffic-type labels are port-based guesses, so encrypted DNS on HTTPS ports shows as HTTPS/TLS.
+- Older history without recorded ports stays **Unclassified**, keeping its original byte counts.
+
+### Known limits
+
+- **TCP downloads recorded before the receive-endpoint fix** may have a wrong destination, adapter, network, or traffic type. The original remote endpoint wasn't saved, so those details can't be rebuilt. New traffic uses the corrected mapping.
+- **Deleted history** from older versions can't be recovered.
+
+### Time ranges and charts
+
+- The chart follows the selected period: 15m, 30m, longer presets, *Since beginning of month*, *All time*, or a custom rolling duration or date range.
+- Month-to-date starts at local midnight on the first day and updates when the month changes.
+- Custom ranges use local time and include the full final minute. CSV timestamps stay UTC.
+- Views up to 24 hours refresh every second. Longer and all-time views refresh every five seconds.
+- Recent adapter samples are kept for 24 hours and survive restarts. Older data uses minute aggregates. Long ranges are downsampled for display.
+- Missing samples show as gaps, never as invented zeros or lines across downtime. Measured zero traffic still shows as zero.
+- **Freeze** pauses only the chart. Recording, range totals, and live speed keep going.
+- Country lookups apply to newly captured traffic and are approximate.
+
+---
 
 ## Diagnostics and verification
 
@@ -96,15 +221,72 @@ cargo clippy --locked --all-targets --features ui-preview -- -D warnings
 cargo run -- --diagnose 8
 # In an elevated terminal:
 cargo run -- --self-test-capture
-# Optional: a small HTTP test to 1.1.1.1:80
+# Optional: a small HTTP request to 1.1.1.1:80
 cargo run -- --self-test-public
 ```
 
-`--diagnose` prints adapter inventory, connection/process counts, per-protocol observed events, byte deltas and loss counters. `--self-test-capture` generates known local TCP and UDP payloads over IPv4 and IPv6 and checks payload delivery and endpoint attribution. `--self-test-public` makes a small, fixed HTTP request to 1.1.1.1:80 and checks the captured TCP endpoints, adapter, WAN classification and byte counts. The diagnostic process does not write usage history, though an already running monitor can record its test traffic. Neither test changes network configuration or installs anything.
+| Command | What it checks |
+| --- | --- |
+| `--diagnose` | Adapter inventory, connection and process counts, per-protocol events, byte deltas, and loss counters |
+| `--self-test-capture` | Known local TCP and UDP payloads over IPv4 and IPv6, checking delivery and endpoint attribution |
+| `--self-test-public` | A small fixed HTTP request to 1.1.1.1:80, checking TCP endpoints, adapter, WAN classification, and byte counts |
 
-See [docs/ADMIN.md](docs/ADMIN.md) for administrator-launch details, [docs/PRIVACY.md](docs/PRIVACY.md) for what is stored and changed, [docs/UNINSTALL.md](docs/UNINSTALL.md) for installing and removing the app, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md), and [docs/VALIDATION.md](docs/VALIDATION.md). Build/test status is recorded in the validation document, including checks that could not be completed.
+The diagnostic commands don't write usage history, though a running monitor can record their traffic. None of them change network settings or install anything.
 
-## Sources
+Build and test status, including anything that couldn't be completed, is recorded in [docs/VALIDATION.md](docs/VALIDATION.md).
+
+---
+
+## Storage reliability
+
+- Adapter samples and usage totals are committed together, using SQLite `FULL` synchronization.
+- On a normal exit, the app stops capture, drains its buffers, saves the final partial sample, and runs a non-blocking checkpoint.
+- If another program has the database open, committed data stays in the WAL until it can be checkpointed.
+- Saved chart data loads before the first new live tick after reopening.
+- Integrity is checked in the background at launch, and before any file-layout upgrade.
+- A history that can't be opened is **never silently replaced**. The app offers to move the damaged files aside, keeping them, and start a fresh history.
+- Chart and list reads use a separate read-only connection, so they never slow capture.
+- Bundled SQLite version: 3.54.1.
+
+---
+
+## UI development
+
+The preview uses generated sample data. It has no settings, capture, tray, or database access.
+
+```powershell
+cargo run --example ui_preview --features ui-preview -- apps --small
+# Other screens: overview, connections, adapters, settings. Add --light for Light.
+```
+
+For an offline review of the real egui layout, with no desktop input:
+
+```powershell
+cargo test --features ui-preview export_ui_review -- --ignored
+python scripts/render_ui.py
+```
+
+The renderer needs NumPy and Pillow, and writes PNGs to the git-ignored `target/ui-review` folder. Default builds don't include the preview feature.
+
+---
+
+## Documentation
+
+| Document | What's inside |
+| --- | --- |
+| [ADMIN.md](docs/ADMIN.md) | Administrator launch details |
+| [PRIVACY.md](docs/PRIVACY.md) | What is stored and what is changed |
+| [UNINSTALL.md](docs/UNINSTALL.md) | Installing and removing the app |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the code is organised |
+| [ROADMAP.md](docs/ROADMAP.md) | What's planned next |
+| [VALIDATION.md](docs/VALIDATION.md) | Build and test status |
+| [THIRD_PARTY.md](THIRD_PARTY.md) | Dependency and theme credits |
+
+---
+
+## Sources and license
+
+Background reading for the measurements:
 
 - [Microsoft: GetIfTable2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2)
 - [Microsoft: connected Wi-Fi network name](https://learn.microsoft.com/en-us/uwp/api/windows.networking.connectivity.wlanconnectionprofiledetails.getconnectedssid)
@@ -114,26 +296,4 @@ See [docs/ADMIN.md](docs/ADMIN.md) for administrator-launch details, [docs/PRIVA
 - [FerrisETW](https://github.com/n4r1b/ferrisetw)
 - [egui](https://github.com/emilk/egui)
 
-MIT license. Theme and dependency credits are in [THIRD_PARTY.md](THIRD_PARTY.md).
-
-## Storage reliability
-
-Live adapter samples and usage totals commit together, using SQLite FULL synchronization. A normal exit stops the event producer, drains its final buffers, commits the last partial sample and performs a nonblocking database checkpoint before the worker finishes. If another reader holds the database, committed data stays in the WAL until it can be checkpointed later. Saved chart data loads before the first new live tick after reopening. SQLite integrity is checked in the background after launch, and before any upgrade of the file layout; a history that cannot be opened is never silently replaced: the app offers to move the damaged files aside, keeping them, and start a new history. Reading history for the chart and lists happens on a separate read-only connection so it never delays capture. The bundled SQLite version is 3.54.1.
-
-## UI development
-
-The optional preview uses generated sample data, without user settings, capture, tray integration or database access:
-
-```powershell
-cargo run --example ui_preview --features ui-preview -- apps --small
-# Other initial screens: overview, connections, adapters, settings; add --light for Light.
-```
-
-For an offline review of the actual egui geometry (no desktop input):
-
-```powershell
-cargo test --features ui-preview export_ui_review -- --ignored
-python scripts/render_ui.py
-```
-
-The renderer needs NumPy and Pillow and writes local PNGs under the ignored target/ui-review folder. Sample-data previews are separate from live monitoring. Default builds do not include the preview feature.
+Released under the **MIT License**. See [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md).
