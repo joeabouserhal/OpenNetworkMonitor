@@ -1358,3 +1358,47 @@ fn the_destination_breakdown_fills_exactly_its_declared_height() {
     out.textures_delta.clear();
     assert_eq!(height, crate::graph::DESTINATION_HEIGHT);
 }
+#[test]
+fn the_peak_is_quieter_than_the_live_speed() {
+    fn styled(shape: &egui::Shape, into: &mut Vec<(String, Color32, f32)>) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| styled(s, into)),
+            egui::Shape::Text(text) => {
+                if let Some(section) = text.galley.job.sections.first() {
+                    into.push((
+                        text.galley.job.text.clone(),
+                        section.format.color,
+                        section.format.font_id.size,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    let ctx = context(Theme::Dark);
+    let palette = Theme::Dark.palette();
+    let mut app = fixture();
+    app.data.history = Arc::new(history_with_samples());
+    let (mut out, _, _) = app_frame(&mut app, &ctx, Vec2::new(1200.0, 820.0), vec![]);
+    let mut texts = Vec::new();
+    out.shapes.iter().for_each(|s| styled(&s.shape, &mut texts));
+    out.textures_delta.clear();
+    let one = |text: &str, min: f32, max: f32| {
+        texts
+            .iter()
+            .find(|(t, _, size)| t == text && (min..=max).contains(size))
+            .cloned()
+            .unwrap_or_else(|| panic!("Missing {text} between {min} and {max}pt"))
+    };
+    // Empty live rows make both live speeds read zero; they are the large numbers.
+    let (_, live_color, live_size) = one("0 B/s", 20.0, 40.0);
+    let (_, peak_color, peak_size) = one(&app.rate(4_000_000.0), 8.0, 20.0);
+    let (_, label_color, label_size) = one("Peak", 8.0, 20.0);
+    assert_eq!(live_color, palette.text);
+    assert_eq!(peak_color, palette.dim, "The peak uses the secondary grey");
+    assert_eq!(label_color, palette.dim);
+    assert!(
+        peak_size <= 13.0 && label_size < peak_size && live_size >= 24.0,
+        "The peak stays small next to the {live_size}pt live speed"
+    );
+}

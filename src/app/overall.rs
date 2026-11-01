@@ -317,10 +317,10 @@ fn series_toggle(
         p.dim,
     );
     let label_width = widgets::text_width(ui.painter(), label, sans(13.5)) + 16.0;
-    let peak_width = widgets::text_width(ui.painter(), peak, bold(13.5)).max(widgets::text_width(
+    let peak_width = widgets::text_width(ui.painter(), peak, sans(12.5)).max(widgets::text_width(
         ui.painter(),
         "Peak",
-        sans(12.0),
+        sans(11.5),
     )) + 2.0;
     let gap = 26.0;
     let content = galley.size().x + gap + peak_width;
@@ -364,34 +364,35 @@ fn series_toggle(
         p.text.gamma_multiply(fade),
         p.dim.gamma_multiply(fade),
     );
-    // The peak sits beside the live number, centred on it, behind a faint rule.
+    // The peak sits beside the live number, centred on it. It is deliberately quiet: small,
+    // regular weight and the secondary grey, so the live speed stays the focus.
     let left = rect.left() + galley.size().x + gap;
     painter.vline(
         left - gap / 2.0,
-        rect.top() + 27.0..=rect.top() + 53.0,
-        widgets::px_stroke(ui.ctx(), 1.0, p.hairline.gamma_multiply(2.0)),
+        rect.top() + 29.0..=rect.top() + 51.0,
+        widgets::px_stroke(ui.ctx(), 1.0, p.hairline),
     );
     paint_text(
         painter,
         Rect::from_min_size(
-            Pos2::new(left, rect.top() + 24.0),
-            Vec2::new(peak_width, 15.0),
+            Pos2::new(left, rect.top() + 26.0),
+            Vec2::new(peak_width, 13.0),
         ),
         Align2::LEFT_CENTER,
         "Peak",
-        sans(12.0),
+        sans(11.5),
         p.dim.gamma_multiply(fade),
     );
     paint_text(
         painter,
         Rect::from_min_size(
-            Pos2::new(left, rect.top() + 39.0),
-            Vec2::new(peak_width, 17.0),
+            Pos2::new(left, rect.top() + 40.0),
+            Vec2::new(peak_width, 15.0),
         ),
         Align2::LEFT_CENTER,
         peak,
-        bold(13.5),
-        p.text.gamma_multiply(fade),
+        sans(12.5),
+        p.dim.gamma_multiply(fade),
     );
     response
         .on_hover_text("Peak is the highest speed in the selected period. Click to show or hide this direction.")
