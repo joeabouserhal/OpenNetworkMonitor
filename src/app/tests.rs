@@ -49,6 +49,8 @@ fn fixture() -> MonitorApp {
         custom_period: None,
         app_cache: Arc::default(),
         app_cache_key: None,
+        history_totals: Default::default(),
+        dialogs: Default::default(),
         breakdown_cache: Arc::default(),
         breakdown_cache_key: None,
         host_request: None,
@@ -73,7 +75,7 @@ fn app_fixture() -> MonitorApp {
             .collect(),
         ..Default::default()
     });
-    app.data.snapshot.app_labels.insert(
+    Arc::make_mut(&mut app.data.snapshot).app_labels.insert(
         r"C:\Apps\Long application directory 0\plain0.exe".into(),
         "Friendly Browser".into(),
     );
@@ -322,8 +324,8 @@ fn every_page_uses_the_same_bounded_shell_in_all_themes() {
                 app.page = page;
                 app.settings.filter.source = source;
                 app.settings.theme = theme;
-                app.data.snapshot.etw_active = true;
-                app.data.snapshot.connections = (0..65)
+                Arc::make_mut(&mut app.data.snapshot).etw_active = true;
+                Arc::make_mut(&mut app.data.snapshot).connections = (0..65)
                     .map(|i| Connection {
                         app: format!(r"C:\Applications\Long folder {i}\browser.exe"),
                         pid: i,
@@ -334,7 +336,7 @@ fn every_page_uses_the_same_bounded_shell_in_all_themes() {
                         state: "Established".into(),
                     })
                     .collect();
-                app.data.snapshot.adapters = (0..8)
+                Arc::make_mut(&mut app.data.snapshot).adapters = (0..8)
                     .map(|i| Adapter {
                         id: i.to_string(),
                         name: format!("Ethernet {i}"),
@@ -390,8 +392,8 @@ fn sidebar_and_adapter_shortcut_keep_app_traffic_in_overview() {
     let ctx = context(Theme::Dark);
     let size = Vec2::new(1200.0, 820.0);
     let mut app = app_fixture();
-    app.data.snapshot.etw_active = true;
-    app.data.snapshot.adapters = vec![Adapter {
+    Arc::make_mut(&mut app.data.snapshot).etw_active = true;
+    Arc::make_mut(&mut app.data.snapshot).adapters = vec![Adapter {
         id: "eth".into(),
         name: "Ethernet".into(),
         ..Default::default()
@@ -871,7 +873,7 @@ fn expanded_period_menu_supports_both_views_and_custom_cancel() {
 fn many_adapters_leave_wifi_choices_accessible() {
     let ctx = context(Theme::Dark);
     let mut app = app_fixture();
-    app.data.snapshot.adapters = (0..40)
+    Arc::make_mut(&mut app.data.snapshot).adapters = (0..40)
         .map(|i| Adapter {
             id: format!("adapter-{i}"),
             name: format!("Adapter {i}"),
@@ -879,7 +881,7 @@ fn many_adapters_leave_wifi_choices_accessible() {
             ..Default::default()
         })
         .collect();
-    app.data.snapshot.wifi_networks = vec![WifiNetwork {
+    Arc::make_mut(&mut app.data.snapshot).wifi_networks = vec![WifiNetwork {
         id: "home-id".into(),
         name: "Home Wi-Fi".into(),
     }];
@@ -930,15 +932,16 @@ fn overview_and_app_filter_bars_have_the_same_height() {
     }
 }
 fn three_adapters(app: &mut MonitorApp) {
-    app.data.snapshot.adapters = [("eth", "Ethernet"), ("wifi", "Wi-Fi"), ("vpn", "VPN")]
-        .into_iter()
-        .map(|(id, name)| Adapter {
-            id: id.into(),
-            name: name.into(),
-            up: true,
-            ..Default::default()
-        })
-        .collect();
+    Arc::make_mut(&mut app.data.snapshot).adapters =
+        [("eth", "Ethernet"), ("wifi", "Wi-Fi"), ("vpn", "VPN")]
+            .into_iter()
+            .map(|(id, name)| Adapter {
+                id: id.into(),
+                name: name.into(),
+                up: true,
+                ..Default::default()
+            })
+            .collect();
 }
 #[test]
 fn overall_dropdowns_change_period_and_support_multiple_adapter_choices() {
@@ -981,7 +984,7 @@ fn wifi_connection_filter_is_independent_of_adapters_and_can_be_cleared() {
             app.settings.filter.scope = Scope::Wan;
         }
         three_adapters(&mut app);
-        app.data.snapshot.wifi_networks = vec![
+        Arc::make_mut(&mut app.data.snapshot).wifi_networks = vec![
             WifiNetwork {
                 id: "home-id".into(),
                 name: "Home Wi-Fi".into(),
@@ -1039,7 +1042,7 @@ fn wifi_connection_filter_is_independent_of_adapters_and_can_be_cleared() {
 fn dropdowns_change_filters_and_keep_the_adapter_menu_open_for_multiple_choices() {
     let ctx = context(Theme::Dark);
     let mut app = app_fixture();
-    app.data.snapshot.adapters = [("eth", "Ethernet"), ("wifi", "Wi-Fi")]
+    Arc::make_mut(&mut app.data.snapshot).adapters = [("eth", "Ethernet"), ("wifi", "Wi-Fi")]
         .into_iter()
         .map(|(id, name)| Adapter {
             id: id.into(),
@@ -1206,7 +1209,7 @@ fn every_outline_is_a_whole_number_of_physical_pixels() {
             let mut app = app_fixture();
             app.page = page;
             app.settings.filter.source = source;
-            app.data.snapshot.adapters = (0..3)
+            Arc::make_mut(&mut app.data.snapshot).adapters = (0..3)
                 .map(|i| Adapter {
                     id: i.to_string(),
                     name: format!("Ethernet {i}"),

@@ -88,7 +88,7 @@ pub struct WifiNetwork {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageRow {
     #[serde(default)]
     pub traffic_type: String,
@@ -209,14 +209,14 @@ fn month_start<T: TimeZone>(now: chrono::DateTime<T>) -> i64 {
         })
         .unwrap_or_else(|| now.timestamp())
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Point {
     pub observed: bool,
     pub timestamp: i64,
     pub down: u64,
     pub up: u64,
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct History {
     pub window_start: i64,
     pub window_end: i64,
@@ -231,12 +231,12 @@ pub struct AppUsage {
     pub down: u64,
     pub up: u64,
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TransportSummary {
     pub classified: ScopeTotals,
     pub top_apps: Vec<AppUsage>,
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScopeTotals {
     pub lan: u64,
     pub wan: u64,

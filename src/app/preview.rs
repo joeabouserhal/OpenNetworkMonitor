@@ -48,6 +48,8 @@ impl MonitorApp {
             custom_period: None,
             app_cache: Arc::default(),
             app_cache_key: None,
+            history_totals: Default::default(),
+            dialogs: Default::default(),
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
             host_request: None,
@@ -101,13 +103,12 @@ impl MonitorApp {
         let mut rows = Vec::new();
         for i in 0..35 {
             let path = paths[i % paths.len()].to_owned();
-            self.data
-                .snapshot
+            Arc::make_mut(&mut self.data.snapshot)
                 .app_labels
                 .insert(path.clone(), names[i % names.len()].into());
             let remote = format!("203.0.113.{}", i + 1);
             if i < 4 {
-                self.data.snapshot.host_labels.insert(
+                Arc::make_mut(&mut self.data.snapshot).host_labels.insert(
                     remote.clone(),
                     [
                         "media.example.net",
@@ -147,7 +148,7 @@ impl MonitorApp {
             .top_apps
             .sort_by_key(|a| std::cmp::Reverse(a.down + a.up));
         self.data.top_apps.truncate(5);
-        self.data.snapshot.connections = (0..85)
+        Arc::make_mut(&mut self.data.snapshot).connections = (0..85)
             .map(|i| Connection {
                 pid: 4200 + i as u32,
                 app: paths[i % paths.len()].into(),
@@ -166,7 +167,7 @@ impl MonitorApp {
                 state: if i % 3 == 0 { "Bound" } else { "Established" }.into(),
             })
             .collect();
-        self.data.snapshot.adapters = [
+        Arc::make_mut(&mut self.data.snapshot).adapters = [
             (
                 "ethernet",
                 "Ethernet",
@@ -221,7 +222,7 @@ impl MonitorApp {
             ..Default::default()
         })
         .collect();
-        self.data.snapshot.wifi_networks = vec![
+        Arc::make_mut(&mut self.data.snapshot).wifi_networks = vec![
             WifiNetwork {
                 id: "sample-home".into(),
                 name: "Home Wi-Fi".into(),
@@ -231,7 +232,7 @@ impl MonitorApp {
                 name: "Office Wi-Fi".into(),
             },
         ];
-        self.data.snapshot.live_rows = rows
+        Arc::make_mut(&mut self.data.snapshot).live_rows = rows
             .iter()
             .cloned()
             .map(|r| UsageRow {
@@ -240,10 +241,11 @@ impl MonitorApp {
                 ..r
             })
             .collect();
-        self.data.snapshot.interval = 1.0;
-        self.data.snapshot.etw_active = true;
-        self.data.snapshot.capture_status = "Detailed monitoring is active".into();
-        self.data.snapshot.parsed_events = 1_482_071;
+        Arc::make_mut(&mut self.data.snapshot).interval = 1.0;
+        Arc::make_mut(&mut self.data.snapshot).etw_active = true;
+        Arc::make_mut(&mut self.data.snapshot).capture_status =
+            "Detailed monitoring is active".into();
+        Arc::make_mut(&mut self.data.snapshot).parsed_events = 1_482_071;
         let points = (0..300)
             .map(|i| Point {
                 timestamp: now - 300 + i,

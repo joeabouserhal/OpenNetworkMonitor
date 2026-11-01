@@ -167,7 +167,10 @@ impl MonitorApp {
         section(ui, "Background monitoring", |ui| {
             self.startup.poll();
             let mut enabled = self.startup.enabled;
-            let usable = self.startup.available && !self.startup.busy;
+            // An unprotected copy may still turn startup off, never on.
+            let usable = self.startup.available
+                && !self.startup.busy
+                && (self.startup.enabled || self.startup.location_risk.is_none());
             setting_row(
                 ui,
                 "Launch when I sign in to Windows",
@@ -192,6 +195,15 @@ impl MonitorApp {
                             .weak(),
                     );
                 });
+                ui.add_space(10.0);
+            }
+            if let Some(risk) = &self.startup.location_risk {
+                let advice = if self.startup.enabled {
+                    "Startup runs with administrator rights, so anything that can change this copy could run elevated. Turn it off, or move the app to Program Files."
+                } else {
+                    "Startup runs with administrator rights, so the app has to live in a protected folder such as Program Files."
+                };
+                widgets::message(ui, &format!("{advice} {risk}."), true, false);
                 ui.add_space(10.0);
             }
             if self.startup.enabled && self.startup.different_copy {
@@ -311,14 +323,11 @@ impl MonitorApp {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                if widgets::button(ui, ButtonKind::Secondary, "Choose database…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("MaxMind Country or City database", &["mmdb"])
-                        .pick_file()
-                {
-                    self.settings.geo = Some(path.clone());
-                    let _ = self.worker.tx.send(Command::Geo(Some(path)));
-                }
+                ui.add_enabled_ui(!self.dialogs.busy(), |ui| {
+                    if widgets::button(ui, ButtonKind::Secondary, "Choose database…").clicked() {
+                        self.dialogs.pick_country_database(ui.ctx());
+                    }
+                });
                 if self.settings.geo.is_some()
                     && widgets::button(ui, ButtonKind::Ghost, "Disable lookup").clicked()
                 {
@@ -360,7 +369,7 @@ impl MonitorApp {
             )
             .clicked()
             {
-                self.export();
+                self.export(ui.ctx());
             }
             ui.add_space(14.0);
         });

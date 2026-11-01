@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
     path::PathBuf,
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver, Sender},
@@ -15,7 +15,7 @@ use std::{
 
 #[derive(Default, Clone)]
 pub struct Shared {
-    pub snapshot: Snapshot,
+    pub snapshot: Arc<Snapshot>,
     pub history: Arc<History>,
     pub classified: ScopeTotals,
     pub top_apps: Vec<AppUsage>,
@@ -30,6 +30,8 @@ pub enum Command {
     Geo(Option<PathBuf>),
     RetryCapture,
     ResolveHosts(Vec<String>),
+    /// Display names the history reader worked out for the apps it loaded.
+    Labels(HashMap<String, String>),
     Stop,
 }
 pub struct Worker {
@@ -47,9 +49,11 @@ impl Worker {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let (tx, rx) = mpsc::channel();
         let state = shared.clone();
+        let reader = HistoryReader::start(&store, &shared, &tx, &repaint)?;
+        spawn_integrity_check(&store, &shared, &repaint);
         let join = thread::Builder::new()
             .name("network-collector".into())
-            .spawn(move || run(store, filter, geo, state, rx, repaint))?;
+            .spawn(move || run(store, filter, geo, state, rx, repaint, reader))?;
         Ok(Self {
             shared,
             tx,
@@ -161,6 +165,164 @@ fn read_histories(
         TransportSummary::default()
     };
     Ok((history, summary))
+}
+struct HistoryRequest {
+    filter: Filter,
+    known: HashSet<String>,
+    revision: u64,
+}
+/// Reads history, works out app labels and publishes both. Slow for long periods,
+/// so it never runs on the collector thread when the database can be shared.
+fn load_history(
+    store: &Store,
+    request: &HistoryRequest,
+    shared: &Mutex<Shared>,
+) -> Result<HashMap<String, String>> {
+    let (history, summary) = read_histories(
+        store,
+        &request.filter,
+        &request.known,
+        chrono::Utc::now().timestamp(),
+    )?;
+    let unique: HashSet<String> = history
+        .rows
+        .iter()
+        .filter(|r| !r.app.is_empty())
+        .map(|r| r.app.clone())
+        .chain(summary.top_apps.iter().map(|r| r.app.clone()))
+        .collect();
+    let paths: HashMap<u32, String> = unique
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| (i as u32, p))
+        .collect();
+    let labels = capture::process_labels(&paths);
+    if let Ok(mut s) = shared.lock() {
+        // A fixed past period reads back identical data every time; leaving the
+        // generation alone spares the window from rebuilding its tables.
+        let unchanged = s.history_revision == request.revision
+            && s.history_generation > 0
+            && *s.history == history
+            && s.classified == summary.classified
+            && s.top_apps == summary.top_apps;
+        if !unchanged {
+            s.history = Arc::new(history);
+            s.history_generation += 1;
+            s.classified = summary.classified;
+            s.top_apps = summary.top_apps;
+            s.history_revision = request.revision;
+        }
+    }
+    Ok(labels)
+}
+/// Scans the saved history for damage without delaying the window or the capture.
+fn spawn_integrity_check(store: &Store, shared: &Arc<Mutex<Shared>>, ctx: &eframe::egui::Context) {
+    let Ok(Some(checker)) = store.open_reader() else {
+        return;
+    };
+    let (shared, ctx) = (shared.clone(), ctx.clone());
+    let _ = thread::Builder::new()
+        .name("history-check".into())
+        .spawn(move || {
+            if let Err(e) = checker.integrity_check() {
+                notice(&shared, format!("{e:#}"));
+                ctx.request_repaint();
+            }
+        });
+}
+struct ReaderThread {
+    requests: Sender<HistoryRequest>,
+    interrupt: rusqlite::InterruptHandle,
+    stopping: Arc<AtomicBool>,
+    join: thread::JoinHandle<()>,
+}
+/// Runs history queries on a second read-only connection. Without a database file
+/// to share (in-memory tests) the query runs inline on the collector instead.
+struct HistoryReader {
+    thread: Option<ReaderThread>,
+}
+impl HistoryReader {
+    fn start(
+        store: &Store,
+        shared: &Arc<Mutex<Shared>>,
+        commands: &Sender<Command>,
+        ctx: &eframe::egui::Context,
+    ) -> Result<Self> {
+        let Some(reader) = store.open_reader()? else {
+            return Ok(Self { thread: None });
+        };
+        let (requests, incoming) = mpsc::channel::<HistoryRequest>();
+        let interrupt = reader.interrupt_handle();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (shared, commands, ctx, quitting) = (
+            shared.clone(),
+            commands.clone(),
+            ctx.clone(),
+            stopping.clone(),
+        );
+        let join = thread::Builder::new()
+            .name("history-reader".into())
+            .spawn(move || {
+                while let Ok(mut request) = incoming.recv() {
+                    // Only the newest filter matters; skip any that queued up meanwhile.
+                    while let Ok(newer) = incoming.try_recv() {
+                        request = newer;
+                    }
+                    match load_history(&reader, &request, &shared) {
+                        Ok(labels) => {
+                            let _ = commands.send(Command::Labels(labels));
+                        }
+                        Err(_) if quitting.load(Ordering::Relaxed) => break,
+                        Err(e) => notice(&shared, format!("History could not load: {e}")),
+                    }
+                    ctx.request_repaint();
+                }
+            })?;
+        Ok(Self {
+            thread: Some(ReaderThread {
+                requests,
+                interrupt,
+                stopping,
+                join,
+            }),
+        })
+    }
+    /// Queues a read. Returns the labels at once when it had to run inline.
+    fn request(
+        &self,
+        request: HistoryRequest,
+        store: &Store,
+        shared: &Arc<Mutex<Shared>>,
+    ) -> Option<HashMap<String, String>> {
+        if let Some(thread) = &self.thread {
+            let _ = thread.requests.send(request);
+            return None;
+        }
+        match load_history(store, &request, shared) {
+            Ok(labels) => Some(labels),
+            Err(e) => {
+                notice(shared, format!("History could not load: {e}"));
+                None
+            }
+        }
+    }
+}
+impl Drop for HistoryReader {
+    fn drop(&mut self) {
+        if let Some(ReaderThread {
+            requests,
+            interrupt,
+            stopping,
+            join,
+        }) = self.thread.take()
+        {
+            // Abort a long query so exiting never waits for it.
+            stopping.store(true, Ordering::Relaxed);
+            drop(requests);
+            interrupt.interrupt();
+            let _ = join.join();
+        }
+    }
 }
 #[derive(Clone, Debug)]
 struct WifiInterval {
@@ -311,6 +473,7 @@ fn run(
     shared: Arc<Mutex<Shared>>,
     rx: Receiver<Command>,
     ctx: eframe::egui::Context,
+    reader: HistoryReader,
 ) {
     let mut hosts = crate::hosts::Resolver::new();
     let mut geo = Geo::default();
@@ -365,7 +528,7 @@ fn run(
         }
     }
     if let Ok(mut state) = shared.lock() {
-        state.snapshot.wifi_networks = wifi_catalog.values().cloned().collect();
+        Arc::make_mut(&mut state.snapshot).wifi_networks = wifi_catalog.values().cloned().collect();
     }
     let mut tick = Instant::now();
     let mut last_refresh = Instant::now() - Duration::from_secs(10);
@@ -379,24 +542,19 @@ fn run(
     let mut pending_samples = Vec::<LiveTick>::new();
     let mut event_buffer = EventBuffer::default();
     // Load saved data immediately; reopening must not wait for a new live sample.
-    if let Ok((history, summary)) =
-        read_histories(&store, &filter, &known, chrono::Utc::now().timestamp())
-    {
-        let paths: HashMap<u32, String> = summary
-            .top_apps
-            .iter()
-            .enumerate()
-            .map(|(i, a)| (i as u32, a.app.clone()))
-            .collect();
-        labels.extend(capture::process_labels(&paths));
-        if let Ok(mut state) = shared.lock() {
-            state.history = Arc::new(history);
-            state.classified = summary.classified;
-            state.top_apps = summary.top_apps;
-            state.snapshot.app_labels = labels.clone();
-            state.history_generation += 1;
-        }
-    }
+    labels.extend(
+        reader
+            .request(
+                HistoryRequest {
+                    filter: filter.clone(),
+                    known: known.clone(),
+                    revision: filter_revision,
+                },
+                &store,
+                &shared,
+            )
+            .unwrap_or_default(),
+    );
     loop {
         let wait = Duration::from_secs(1).saturating_sub(tick.elapsed());
         let mut stop = false;
@@ -433,6 +591,7 @@ fn run(
                     );
                 }
                 Command::ResolveHosts(addresses) => hosts.request(&addresses),
+                Command::Labels(found) => labels.extend(found),
                 Command::RetryCapture => {
                     drop(etw);
                     etw = capture::EtwCapture::start();
@@ -443,7 +602,7 @@ fn run(
             && hosts.poll()
             && let Ok(mut state) = shared.lock()
         {
-            state.snapshot.host_labels = hosts.labels();
+            Arc::make_mut(&mut state.snapshot).host_labels = hosts.labels();
             state.revision += 1;
         }
         let sample = stop || tick.elapsed() >= Duration::from_secs(1);
@@ -591,7 +750,10 @@ fn run(
                     .map(|r| (r.adapter_id.clone(), r.wifi_network.clone()))
                     .collect(),
             };
-            pending_samples.push(live_tick);
+            // Once recording has given up nothing drains this list, so stop growing it.
+            if !storage_failed {
+                pending_samples.push(live_tick);
+            }
             let mut event_rows = BTreeMap::<
                 (i64, String, u32, String, String, String, String, String),
                 UsageRow,
@@ -727,7 +889,7 @@ fn run(
             snapshot.app_labels = labels.clone();
             snapshot.host_labels = hosts.labels();
             if let Ok(mut s) = shared.lock() {
-                s.snapshot = snapshot;
+                s.snapshot = Arc::new(snapshot);
                 s.revision += 1;
             }
             if last_prune.elapsed() >= Duration::from_secs(3600) {
@@ -746,32 +908,19 @@ fn run(
         if (refresh && !visible.is_empty())
             || (sample && last_refresh.elapsed() >= refresh_interval)
         {
-            match read_histories(&store, &filter, &known, chrono::Utc::now().timestamp()) {
-                Ok((history, summary)) => {
-                    let unique: HashSet<String> = history
-                        .rows
-                        .iter()
-                        .filter(|r| !r.app.is_empty())
-                        .map(|r| r.app.clone())
-                        .chain(summary.top_apps.iter().map(|r| r.app.clone()))
-                        .collect();
-                    let paths: HashMap<u32, String> = unique
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, p)| (i as u32, p))
-                        .collect();
-                    labels.extend(capture::process_labels(&paths));
-                    if let Ok(mut s) = shared.lock() {
-                        s.history = Arc::new(history);
-                        s.history_generation += 1;
-                        s.classified = summary.classified;
-                        s.top_apps = summary.top_apps;
-                        s.history_revision = filter_revision;
-                        s.snapshot.app_labels = labels.clone();
-                    }
-                }
-                Err(e) => notice(&shared, format!("History could not load: {e}")),
-            }
+            labels.extend(
+                reader
+                    .request(
+                        HistoryRequest {
+                            filter: filter.clone(),
+                            known: known.clone(),
+                            revision: filter_revision,
+                        },
+                        &store,
+                        &shared,
+                    )
+                    .unwrap_or_default(),
+            );
             refresh = false;
             last_refresh = Instant::now();
         }
@@ -782,6 +931,65 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_loads_on_its_own_thread_and_exit_does_not_wait_for_it() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        let now = chrono::Utc::now().timestamp();
+        store.write(
+            now / 60 * 60,
+            &[UsageRow {
+                source: "adapter".into(),
+                adapter_id: "visible".into(),
+                down: 42,
+                ..Default::default()
+            }],
+        )?;
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (commands, incoming) = mpsc::channel();
+        let reader = HistoryReader::start(
+            &store,
+            &shared,
+            &commands,
+            &eframe::egui::Context::default(),
+        )?;
+        let request = |revision| HistoryRequest {
+            filter: Filter::default(),
+            known: HashSet::from(["visible".into()]),
+            revision,
+        };
+        assert!(
+            reader.request(request(7), &store, &shared).is_none(),
+            "A file database is read on the reader thread, not inline"
+        );
+        assert!(matches!(
+            incoming.recv_timeout(Duration::from_secs(5))?,
+            Command::Labels(_)
+        ));
+        {
+            let state = shared.lock().unwrap();
+            assert_eq!(state.history.down, 42);
+            assert_eq!(state.history_revision, 7);
+            assert_eq!(state.history_generation, 1);
+        }
+        let started = Instant::now();
+        drop(reader);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let memory = Store::open(std::path::Path::new(":memory:"))?;
+        assert!(
+            HistoryReader::start(
+                &memory,
+                &shared,
+                &commands,
+                &eframe::egui::Context::default()
+            )?
+            .thread
+            .is_none(),
+            "An in-memory database cannot be shared with another connection"
+        );
+        Ok(())
+    }
     #[test]
     fn all_adapter_history_excludes_old_hidden_samples() -> Result<()> {
         let mut store = Store::open(std::path::Path::new(":memory:"))?;

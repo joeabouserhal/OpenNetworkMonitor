@@ -58,7 +58,7 @@ fn run() -> Result<()> {
     instance.publish(&data_dir);
     // A copy that exited while minimized saved a collapsed window; repair it before eframe reads it.
     window_state::repair_file(&data_dir.join("preferences.ron"));
-    let store = store::Store::open(&data_dir.join("usage.db"))?;
+    let store = open_store(&data_dir.join("usage.db"))?;
     let icon = eframe::egui::IconData {
         rgba: tray::icon_pixels(),
         width: 32,
@@ -83,6 +83,37 @@ fn run() -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("Could not start the interface: {e}"))?;
     Ok(())
+}
+/// Opens the history. When it cannot be opened, offers to keep the old files aside
+/// and start a new history rather than either refusing to run or silently discarding it.
+fn open_store(path: &std::path::Path) -> Result<store::Store> {
+    let error = match store::Store::open(path) {
+        Ok(store) => return Ok(store),
+        Err(error) => error,
+    };
+    // A history from a newer release is intact; replacing it would lose real data.
+    if error.downcast_ref::<store::NewerVersion>().is_some() {
+        return Err(error);
+    }
+    let answer = rfd::MessageDialog::new()
+        .set_title("OpenNetworkMonitor")
+        .set_level(rfd::MessageLevel::Error)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .set_description(format!(
+            "The saved usage history could not be opened:
+
+{error:#}
+
+Move it aside and start a new history? The old files are kept next to it, named usage.db.damaged-…, so nothing is deleted."
+        ))
+        .show();
+    if answer != rfd::MessageDialogResult::Yes {
+        return Err(error);
+    }
+    let label = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let moved = store::move_aside(path, &label)?;
+    eprintln!("Damaged history moved to {}", moved.display());
+    store::Store::open(path)
 }
 fn diagnose(args: &[String]) -> Result<()> {
     let loopback_test = args.iter().any(|a| a == "--self-test-capture");

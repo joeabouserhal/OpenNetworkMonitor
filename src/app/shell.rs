@@ -161,7 +161,7 @@ impl MonitorApp {
                     )
                     .clicked()
                     {
-                        self.export();
+                        self.export(ui.ctx());
                     }
                 });
             }

@@ -6,18 +6,59 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::Path;
 
+/// The database was written by a later release, so this one must not touch it.
+#[derive(Debug)]
+pub struct NewerVersion;
+impl std::fmt::Display for NewerVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("History was created by a newer OpenNetworkMonitor version")
+    }
+}
+impl std::error::Error for NewerVersion {}
+
+const SCHEMA_VERSION: i64 = 5;
+
+/// Sets a database that cannot be opened aside, together with its WAL and shared
+/// memory files, so a fresh one can take its place without destroying anything.
+pub fn move_aside(path: &Path, label: &str) -> Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("The database path has no file name")?;
+    let moved = path.with_file_name(format!("{name}.damaged-{label}"));
+    anyhow::ensure!(!moved.exists(), "{} already exists", moved.display());
+    std::fs::rename(path, &moved).context("Move the damaged database aside")?;
+    for suffix in ["-wal", "-shm"] {
+        let side = path.with_file_name(format!("{name}{suffix}"));
+        if side.exists() {
+            let _ = std::fs::rename(
+                &side,
+                path.with_file_name(format!("{name}{suffix}.damaged-{label}")),
+            );
+        }
+    }
+    Ok(moved)
+}
+
 pub struct Store {
     db: Connection,
+}
+fn db_integrity(db: &Connection) -> Result<()> {
+    let integrity: String = db.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+    anyhow::ensure!(
+        integrity == "ok",
+        "Saved history failed its integrity check. Preserve usage.db and its WAL before recovery: {integrity}"
+    );
+    Ok(())
 }
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let mut db = Connection::open(path).context("Open usage database")?;
         db.busy_timeout(std::time::Duration::from_secs(3))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        anyhow::ensure!(
-            version <= 5,
-            "History was created by a newer OpenNetworkMonitor version"
-        );
+        if version > SCHEMA_VERSION {
+            return Err(NewerVersion.into());
+        }
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS traffic (
@@ -34,11 +75,12 @@ impl Store {
                 PRIMARY KEY(timestamp,adapter_id));
             ",
         )?;
-        let integrity: String = db.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
-        anyhow::ensure!(
-            integrity == "ok",
-            "Saved history failed its integrity check. Preserve usage.db and its WAL before recovery: {integrity}"
-        );
+        // A current database is checked in the background after launch, since the scan
+        // grows with its size. One that is about to be migrated is checked first so
+        // that damage is never rewritten into the new layout.
+        if version < SCHEMA_VERSION {
+            db_integrity(&db)?;
+        }
         let columns: Vec<String> = {
             let mut q = db.prepare("PRAGMA table_info(traffic)")?;
             q.query_map([], |r| r.get(1))?
@@ -90,6 +132,29 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(Self { db })
+    }
+    /// Scans the file for damage. Slow on a large history, so not part of `open`.
+    pub fn integrity_check(&self) -> Result<()> {
+        db_integrity(&self.db)
+    }
+    /// A second, read-only connection to the same database file for a background
+    /// reader. WAL lets it read while the collector keeps writing. `None` for
+    /// databases that have no file (in-memory), which cannot be shared.
+    pub fn open_reader(&self) -> Result<Option<Self>> {
+        let Some(path) = self.db.path().filter(|path| !path.is_empty()) else {
+            return Ok(None);
+        };
+        let db = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .context("Open usage database for reading")?;
+        db.busy_timeout(std::time::Duration::from_secs(3))?;
+        Ok(Some(Self { db }))
+    }
+    /// Lets another thread abort a query running on this connection.
+    pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
+        self.db.get_interrupt_handle()
     }
     pub fn write(&mut self, timestamp: i64, rows: &[UsageRow]) -> Result<()> {
         let tx = self.db.transaction()?;
@@ -1475,6 +1540,70 @@ mod month_to_date_tests {
             store.export(&directory.path().join("month.csv"), &app_filter, now)?,
             2
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn a_newer_history_is_refused_with_a_recognisable_error() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        drop(Store::open(&path)?);
+        Connection::open(&path)?.execute_batch("PRAGMA user_version=99;")?;
+        let error = Store::open(&path).err().expect("newer history is refused");
+        assert!(error.downcast_ref::<NewerVersion>().is_some(), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_damaged_file_is_moved_aside_with_its_wal_and_a_fresh_history_opens() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        std::fs::write(&path, b"this is not a database, just some damaged bytes")?;
+        std::fs::write(dir.path().join("usage.db-wal"), b"wal")?;
+
+        let moved = move_aside(&path, "test")?;
+        assert_eq!(moved, dir.path().join("usage.db.damaged-test"));
+        assert!(moved.exists());
+        assert!(dir.path().join("usage.db-wal.damaged-test").exists());
+        assert!(!path.exists() && !dir.path().join("usage.db-wal").exists());
+        assert_eq!(
+            std::fs::read(&moved)?,
+            b"this is not a database, just some damaged bytes",
+            "The old bytes are kept untouched"
+        );
+        Store::open(&path)?.integrity_check()?;
+        let garbage = dir.path().join("other.db");
+        std::fs::write(&garbage, b"this is not a database, just some damaged bytes")?;
+        assert!(Store::open(&garbage).is_err());
+        assert!(
+            move_aside(&path, "test").is_err(),
+            "An earlier set-aside copy is never overwritten"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn opening_a_current_history_defers_the_scan_to_the_explicit_check() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        let mut store = Store::open(&path)?;
+        store.write(
+            60,
+            &[UsageRow {
+                source: "adapter".into(),
+                adapter_id: "a".into(),
+                down: 1,
+                ..Default::default()
+            }],
+        )?;
+        store.integrity_check()?;
+        let reader = store.open_reader()?.expect("file database");
+        reader.integrity_check()?;
         Ok(())
     }
 }

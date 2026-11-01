@@ -1,4 +1,6 @@
 //! Opt-in, per-user startup using an interactive, elevated logon task.
+mod location;
+
 use anyhow::{Context, Result, bail, ensure};
 use std::{path::Path, sync::mpsc};
 use windows::{
@@ -23,6 +25,8 @@ const PREFIX: &str = "OpenNetworkMonitor Startup - ";
 pub struct Status {
     pub enabled: bool,
     pub different_copy: bool,
+    /// Why this copy must not run elevated at sign-in, when it must not.
+    pub location_risk: Option<String>,
 }
 
 /// UI state is refreshed from Windows, rather than trusting a saved checkbox.
@@ -32,6 +36,9 @@ pub struct Controller {
     pub enabled: bool,
     pub busy: bool,
     pub different_copy: bool,
+    /// Set while this copy sits where non-administrators can change it, which makes
+    /// an elevated startup task unsafe. Turning startup off is still allowed.
+    pub location_risk: Option<String>,
     pub error: String,
     pub available: bool,
 }
@@ -77,6 +84,7 @@ impl Controller {
             enabled: false,
             busy: false,
             different_copy: false,
+            location_risk: None,
             error: String::new(),
             available: false,
         }
@@ -89,6 +97,7 @@ impl Controller {
                     Ok(status) => {
                         self.enabled = status.enabled;
                         self.different_copy = status.different_copy;
+                        self.location_risk = status.location_risk;
                         self.error.clear();
                     }
                     Err(error) => self.error = format!("Could not update startup: {error:#}"),
@@ -168,9 +177,13 @@ fn owned_task(folder: &ITaskFolder, sid: &str) -> Result<Option<IRegisteredTask>
     Ok(Some(task))
 }
 fn status(exe: &Path) -> Result<Status> {
+    let location_risk = location::risk(exe);
     with_scheduler(|folder, sid| {
         let Some(task) = owned_task(folder, sid)? else {
-            return Ok(Status::default());
+            return Ok(Status {
+                location_risk,
+                ..Status::default()
+            });
         };
         let mut path = BSTR::new();
         let mut arguments = BSTR::new();
@@ -186,6 +199,7 @@ fn status(exe: &Path) -> Result<Status> {
             enabled,
             different_copy: !same_path(Path::new(&path.to_string()), exe)
                 || arguments != "--startup",
+            location_risk,
         })
     })
 }
@@ -211,6 +225,11 @@ fn set_enabled(enabled: bool, exe: &Path) -> Result<()> {
                 unsafe { folder.DeleteTask(&task_name(sid), 0) }?;
             }
             return Ok(());
+        }
+        if let Some(risk) = location::risk(exe) {
+            bail!(
+                "Start at sign-in needs this app in a protected folder such as Program Files: {risk}."
+            );
         }
         let xml = task_xml(sid, exe)?;
         let empty = VARIANT::default();

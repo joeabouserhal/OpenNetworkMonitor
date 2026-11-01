@@ -21,6 +21,7 @@ use std::{
 mod adapters;
 mod apps;
 mod connections;
+mod dialogs;
 mod filters;
 mod overall;
 mod period;
@@ -85,6 +86,12 @@ impl Page {
         }
     }
 }
+/// History bytes per app, remembered until the next history load.
+#[derive(Default)]
+struct HistoryTotals {
+    key: Option<(u64, u64)>,
+    by_app: Arc<BTreeMap<String, (u64, u64)>>,
+}
 #[derive(Default)]
 struct AppTotal {
     path: String,
@@ -122,6 +129,9 @@ pub struct MonitorApp {
     custom_period: Option<CustomPeriod>,
     app_cache: Arc<Vec<AppTotal>>,
     app_cache_key: Option<(u64, u64, u64, String)>,
+    /// Per-app byte totals of the loaded history, which only change with a new load.
+    history_totals: HistoryTotals,
+    dialogs: dialogs::FileDialogs,
     breakdown_cache: Arc<Breakdown>,
     breakdown_cache_key: Option<(u64, u64, u64, String, Option<String>)>,
     host_request: Option<Instant>,
@@ -204,6 +214,8 @@ impl MonitorApp {
             custom_period: None,
             app_cache: Arc::new(Vec::new()),
             app_cache_key: None,
+            history_totals: HistoryTotals::default(),
+            dialogs: dialogs::FileDialogs::default(),
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
             host_request: None,
@@ -233,30 +245,32 @@ impl MonitorApp {
             self.update_filter();
         }
     }
-    fn export(&mut self) {
+    fn export(&mut self, ctx: &egui::Context) {
         let name = format!(
             "network-usage-{}.csv",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         );
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("CSV", &["csv"])
-            .set_file_name(name)
-            .save_file()
-        {
-            let mut filter = self.settings.filter.clone();
-            if filter.source == Source::Transport {
-                if let Some(app) = &self.selected_app {
-                    filter.apps = HashSet::from([app.clone()]);
-                } else if !self.app_search.is_empty() {
-                    filter.apps = self.app_totals().iter().map(|a| a.path.clone()).collect();
-                    if filter.apps.is_empty() {
-                        filter.apps.insert("__none__".into());
-                    }
+        self.dialogs.save_csv(ctx, name);
+    }
+    /// Starts the export once the user has picked where to save it.
+    fn start_export(&mut self, path: PathBuf) {
+        let mut filter = self.settings.filter.clone();
+        if filter.source == Source::Transport {
+            if let Some(app) = &self.selected_app {
+                filter.apps = HashSet::from([app.clone()]);
+            } else if !self.app_search.is_empty() {
+                filter.apps = self.app_totals().iter().map(|a| a.path.clone()).collect();
+                if filter.apps.is_empty() {
+                    filter.apps.insert("__none__".into());
                 }
             }
-            let _ = self.worker.tx.send(Command::Export(path, filter));
-            self.data.notice = "Preparing export…".into();
         }
+        let _ = self.worker.tx.send(Command::Export(path, filter));
+        self.data.notice = "Preparing export…".into();
+    }
+    fn use_country_database(&mut self, path: PathBuf) {
+        self.settings.geo = Some(path.clone());
+        let _ = self.worker.tx.send(Command::Geo(Some(path)));
     }
     fn chart_points(&self) -> Vec<Point> {
         self.frozen
@@ -317,12 +331,30 @@ impl MonitorApp {
         if self.app_cache_key.as_ref() == Some(&key) {
             return self.app_cache.clone();
         }
+        let history_key = (self.data.history_generation, self.filter_revision);
+        if self.history_totals.key != Some(history_key) {
+            let mut by_app = BTreeMap::<String, (u64, u64)>::new();
+            for r in &self.data.history.rows {
+                let t = by_app.entry(r.app.clone()).or_default();
+                t.0 = t.0.saturating_add(r.down);
+                t.1 = t.1.saturating_add(r.up);
+            }
+            self.history_totals = HistoryTotals {
+                key: Some(history_key),
+                by_app: Arc::new(by_app),
+            };
+        }
         let mut totals = BTreeMap::<String, AppTotal>::new();
-        for r in &self.data.history.rows {
-            let t = totals.entry(r.app.clone()).or_default();
-            t.path = r.app.clone();
-            t.down += r.down;
-            t.up += r.up;
+        for (app, (down, up)) in self.history_totals.by_app.iter() {
+            totals.insert(
+                app.clone(),
+                AppTotal {
+                    path: app.clone(),
+                    down: *down,
+                    up: *up,
+                    ..Default::default()
+                },
+            );
         }
         for r in &self.data.snapshot.live_rows {
             if !self.settings.filter.matches(r) {
@@ -359,8 +391,9 @@ impl MonitorApp {
         self.app_cache.clone()
     }
     fn traffic_breakdown(&mut self, totals: &[AppTotal]) -> Arc<Breakdown> {
+        // Host names only ever get added, so their count tells when they changed.
         let key = (
-            self.data.revision,
+            self.data.snapshot.host_labels.len() as u64,
             self.data.history_generation,
             self.filter_revision,
             self.app_search.clone(),
@@ -404,6 +437,11 @@ impl MonitorApp {
 
 impl eframe::App for MonitorApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        match self.dialogs.poll() {
+            Some((dialogs::Purpose::ExportCsv, path)) => self.start_export(path),
+            Some((dialogs::Purpose::CountryDatabase, path)) => self.use_country_database(path),
+            None => {}
+        }
         if !self.settings.wide_summary_initialized {
             let viewport = ctx.input(|i| i.viewport().clone());
             if let Some(rect) = viewport.inner_rect {
