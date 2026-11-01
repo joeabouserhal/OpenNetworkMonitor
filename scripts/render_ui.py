@@ -12,7 +12,10 @@ root = Path(__file__).resolve().parents[1] / 'target' / 'ui-review'
 for source in sorted(root.glob('*.json')):
     data = json.loads(source.read_text(encoding='utf-8'))
     width, height = map(int, data['size'])
+    # eframe clears the window to the panel colour; starting from it also hides seams between abutting triangles.
     canvas = np.zeros((height, width, 4), dtype=np.float32)
+    if 'background' in data:
+        canvas[:, :] = np.array(data['background'], dtype=np.float32) / 255
     textures = {t['id']: np.frombuffer((root / t['file']).read_bytes(), dtype=np.uint8).reshape(t['size'][1], t['size'][0], 4).astype(np.float32) / 255 for t in data['textures']}
     for mesh in data['meshes']:
         texture = textures[mesh['texture']]

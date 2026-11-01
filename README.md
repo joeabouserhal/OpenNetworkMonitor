@@ -35,6 +35,7 @@ These previews use generated sample data.
 
 ![Overall traffic](screenshots/overview.png)
 ![App traffic](screenshots/app-traffic.png)
+![Overall traffic, light theme](screenshots/overview-light.png)
 
 ## Implemented
 
@@ -50,8 +51,8 @@ These previews use generated sample data.
 - Live TCP connection and UDP socket inventory, process names, local/remote endpoints, protocol and state.
 - Optional offline country lookup from a user-supplied GeoLite2/GeoIP2 Country or City `.mmdb` file. No database is bundled and country lookup sends no online requests.
 - A compact 90% default interface size, adjustable from 80% to 110% in Settings → Appearance. The saved size applies throughout the app.
-- A neutral **Slate** default with brighter text and Segoe UI typography, plus Light, Nord and Catppuccin Mocha palettes.
-- Four sidebar destinations: Overview, Connections, Adapters and Settings. App traffic lives in Overview. Shared panel spacing, aligned headers, readable usage totals, labeled Down/Up values and a persistent monitoring status keep navigation consistent.
+- A modern, minimal interface: tonal cards, Segoe UI Semibold/Light typography, pill filters and popovers. **Slate** is the dark default, with Light, Nord and Catppuccin Mocha palettes. Colour is reserved for data (download blue, upload orange).
+- Four sidebar destinations: Overview, Connections, Adapters and Settings (the sidebar becomes an icon rail in narrow windows). App traffic lives in Overview. Ranked rows show Down/Up values and a slim usage bar, and a persistent monitoring status keeps navigation consistent.
 - A fitted Connections table with PID/folder subtitles, bounded address columns and full-value tooltips. Adapter actions align across rows and open the selected adapter directly in Overview. Settings are grouped into sections, with detailed measurement notes collapsed by default.
 - SQLite minute-level history kept indefinitely, stored in `%LOCALAPPDATA%\OpenNetworkMonitor\usage.db`.
 - CSV export of the current usage filters (including the app search or selected app), with UTC timestamps, raw byte counts and traffic types. Existing export files are not overwritten.

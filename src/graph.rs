@@ -1,24 +1,14 @@
 use crate::{
-    model::{Point, ScopeTotals, format_bytes},
-    widgets,
+    model::{Point, ScopeTotals, format_bytes, format_compact_bytes},
+    widgets::{self, bold, paint_text, pal, sans},
 };
-use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-pub const DOWNLOAD_COLOR: Color32 = Color32::from_rgb(86, 202, 164);
-pub const UPLOAD_COLOR: Color32 = Color32::from_rgb(225, 167, 83);
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
 pub fn download_color(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        DOWNLOAD_COLOR
-    } else {
-        Color32::from_rgb(24, 116, 77)
-    }
+    pal(ui).down
 }
 pub fn upload_color(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        UPLOAD_COLOR
-    } else {
-        Color32::from_rgb(140, 86, 12)
-    }
+    pal(ui).up
 }
 
 #[derive(Default)]
@@ -36,6 +26,7 @@ impl Graph {
         bits: bool,
         log: bool,
     ) {
+        let p = pal(ui);
         let width = ui.available_width().max(1.0);
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(width, height.max(90.0)), Sense::hover());
@@ -43,8 +34,8 @@ impl Graph {
             return;
         }
         let plot = Rect::from_min_max(
-            rect.min + Vec2::new(88.0, 10.0),
-            rect.max - Vec2::new(9.0, 25.0),
+            rect.min + Vec2::new(70.0, 8.0),
+            rect.max - Vec2::new(6.0, 28.0),
         );
         let (start, end) = (window.0, window.1.max(window.0 + 1));
         let runs = observed_runs(points, (start, end));
@@ -62,30 +53,35 @@ impl Graph {
         };
         let y = |v: u64| plot.bottom() - (transform(v as f64) / scaled) as f32 * plot.height();
         let painter = ui.painter();
-        let text = axis_color(ui);
-        let grid = if ui.visuals().dark_mode {
-            Color32::from_gray(60)
-        } else {
-            Color32::from_gray(217)
-        };
         for i in 0..5 {
             let f = i as f32 / 4.0;
-            let yy = plot.bottom() - plot.height() * f;
-            painter.line_segment(
-                [Pos2::new(plot.left(), yy), Pos2::new(plot.right(), yy)],
-                Stroke::new(0.8, grid),
-            );
+            let yy = (plot.bottom() - plot.height() * f).round();
+            let line = [Pos2::new(plot.left(), yy), Pos2::new(plot.right(), yy)];
+            if i == 0 {
+                painter.line_segment(line, Stroke::new(1.0, p.hairline.gamma_multiply(2.0)));
+            } else {
+                painter.extend(egui::Shape::dashed_line(
+                    &line,
+                    Stroke::new(1.0, p.hairline),
+                    3.0,
+                    5.0,
+                ));
+            }
             let value = if log {
                 (scaled * f as f64).exp_m1()
             } else {
                 scaled * f as f64
             };
-            painter.text(
-                Pos2::new(plot.left() - 8.0, yy),
-                egui::Align2::RIGHT_CENTER,
-                speed_label(value, bits),
-                FontId::proportional(12.0),
-                text,
+            paint_text(
+                painter,
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), yy - 9.0),
+                    Pos2::new(plot.left() - 12.0, yy + 9.0),
+                ),
+                Align2::RIGHT_CENTER,
+                &speed_label(value, bits),
+                sans(12.0),
+                p.dim,
             );
         }
         let short = end - start <= 300;
@@ -106,26 +102,32 @@ impl Graph {
                         .to_string()
                 })
                 .unwrap_or_default();
-            let align = if i == 0 {
-                egui::Align2::LEFT_TOP
-            } else if i == 4 {
-                egui::Align2::RIGHT_TOP
-            } else {
-                egui::Align2::CENTER_TOP
+            let align = match i {
+                0 => Align2::LEFT_TOP,
+                4 => Align2::RIGHT_TOP,
+                _ => Align2::CENTER_TOP,
             };
-            painter.text(
-                Pos2::new(x(t), plot.bottom() + 8.0),
-                align,
-                label,
-                FontId::proportional(12.0),
-                text,
-            );
+            let anchor = x(t);
+            let area = match i {
+                0 => Rect::from_min_size(
+                    Pos2::new(anchor, plot.bottom() + 10.0),
+                    Vec2::new(90.0, 16.0),
+                ),
+                4 => Rect::from_min_size(
+                    Pos2::new(anchor - 90.0, plot.bottom() + 10.0),
+                    Vec2::new(90.0, 16.0),
+                ),
+                _ => Rect::from_min_size(
+                    Pos2::new(anchor - 45.0, plot.bottom() + 10.0),
+                    Vec2::new(90.0, 16.0),
+                ),
+            };
+            paint_text(painter, area, align, &label, sans(12.0), p.dim);
         }
-        let lines = painter.with_clip_rect(plot.intersect(ui.clip_rect()));
-        for (enabled, is_down, color) in [
-            (down, true, download_color(ui)),
-            (up, false, upload_color(ui)),
-        ] {
+        let lines =
+            painter.with_clip_rect(plot.expand2(Vec2::new(0.0, 4.0)).intersect(ui.clip_rect()));
+        let tint = if p.dark { 52 } else { 40 };
+        for (enabled, is_down, color) in [(down, true, p.down), (up, false, p.up)] {
             if !enabled {
                 continue;
             }
@@ -137,12 +139,12 @@ impl Graph {
                 let line = smooth_line(&samples);
                 if line.len() > 1 {
                     let mut fill = egui::epaint::Mesh::default();
+                    let top =
+                        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), tint);
                     for pair in line.windows(2) {
                         let n = fill.vertices.len() as u32;
-                        let tint =
-                            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 20);
-                        fill.colored_vertex(pair[0], tint);
-                        fill.colored_vertex(pair[1], tint);
+                        fill.colored_vertex(pair[0], top);
+                        fill.colored_vertex(pair[1], top);
                         fill.colored_vertex(
                             Pos2::new(pair[1].x, plot.bottom()),
                             Color32::TRANSPARENT,
@@ -155,20 +157,22 @@ impl Graph {
                         fill.add_triangle(n, n + 2, n + 3);
                     }
                     lines.add(egui::Shape::mesh(fill));
-                    lines.add(egui::Shape::line(line, Stroke::new(1.8, color)));
+                    lines.add(egui::Shape::line(line, Stroke::new(2.0, color)));
                 }
                 if let Some(last) = samples.last() {
-                    lines.circle_filled(*last, 2.0, color);
+                    lines.circle_filled(*last, 5.0, p.card);
+                    lines.circle_filled(*last, 3.5, color);
                 }
             }
         }
         if runs.is_empty() {
-            painter.text(
-                plot.center(),
-                egui::Align2::CENTER_CENTER,
+            paint_text(
+                painter,
+                plot,
+                Align2::CENTER_CENTER,
                 "No recorded samples in this period",
-                FontId::proportional(13.0),
-                text,
+                sans(13.5),
+                p.dim,
             );
         }
         if let Some(pos) = response.hover_pos().filter(|p| plot.contains(*p)) {
@@ -183,21 +187,50 @@ impl Graph {
                 let xx = x(point.timestamp);
                 lines.line_segment(
                     [Pos2::new(xx, plot.top()), Pos2::new(xx, plot.bottom())],
-                    Stroke::new(1.0, text.gamma_multiply(0.6)),
+                    Stroke::new(1.0, p.dim.gamma_multiply(0.55)),
                 );
+                for (enabled, value, color) in [(down, point.down, p.down), (up, point.up, p.up)] {
+                    if enabled {
+                        let at = Pos2::new(xx, y(value));
+                        lines.circle_filled(at, 5.5, p.card);
+                        lines.circle_filled(at, 4.0, color);
+                    }
+                }
                 response.on_hover_ui_at_pointer(|ui| {
+                    ui.set_min_width(190.0);
+                    ui.spacing_mut().item_spacing.y = 6.0;
                     if let Some(date) = chrono::DateTime::from_timestamp(point.timestamp, 0) {
-                        ui.strong(
-                            date.with_timezone(&chrono::Local)
-                                .format("%d %b %Y · %H:%M:%S")
-                                .to_string(),
+                        ui.label(
+                            egui::RichText::new(
+                                date.with_timezone(&chrono::Local)
+                                    .format("%d %b %Y · %H:%M:%S")
+                                    .to_string(),
+                            )
+                            .size(12.5)
+                            .weak(),
                         );
                     }
-                    ui.label(format!(
-                        "Download  {}",
-                        speed_label(point.down as f64, bits)
-                    ));
-                    ui.label(format!("Upload  {}", speed_label(point.up as f64, bits)));
+                    for (enabled, name, value, color) in [
+                        (down, "Download", point.down, p.down),
+                        (up, "Upload", point.up, p.up),
+                    ] {
+                        if !enabled {
+                            continue;
+                        }
+                        ui.horizontal(|ui| {
+                            widgets::status_dot(ui, color);
+                            ui.label(egui::RichText::new(name).size(13.5).weak());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(widgets::strong_text(
+                                        speed_label(value as f64, bits),
+                                        14.0,
+                                    ));
+                                },
+                            );
+                        });
+                    }
                 });
             }
         }
@@ -270,62 +303,54 @@ fn observed_runs(points: &[Point], window: (i64, i64)) -> Vec<Vec<&Point>> {
     runs
 }
 /// Destination bytes are captured app transfers, separate from overall interface totals.
-pub fn destination_breakdown(ui: &mut egui::Ui, rect: Rect, totals: &ScopeTotals) {
+/// Greys keep download/upload blue and orange meaning only direction.
+pub fn destination_breakdown(ui: &mut egui::Ui, totals: &ScopeTotals) {
+    let p = pal(ui);
     let total = totals
         .lan
         .saturating_add(totals.wan)
         .saturating_add(totals.unknown);
-    let title_rect = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + 20.0));
-    widgets::text_at(
-        ui,
-        title_rect,
-        egui::RichText::new("LAN / WAN").size(15.0).strong(),
-        egui::Align::Min,
+    let width = ui.available_width();
+    let (head, _) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
+    paint_text(
+        ui.painter(),
+        head,
+        Align2::LEFT_CENTER,
+        "LAN / WAN",
+        bold(14.5),
+        p.text,
     );
-    widgets::text_at(
-        ui,
-        title_rect,
-        egui::RichText::new(format!("{} captured", format_bytes(total as f64)))
-            .size(12.5)
-            .weak(),
-        egui::Align::Max,
+    paint_text(
+        ui.painter(),
+        head,
+        Align2::RIGHT_CENTER,
+        &format!("{} captured", format_bytes(total as f64)),
+        sans(12.5),
+        p.dim,
     );
-    let response = ui.interact(
-        rect,
-        ui.make_persistent_id("destination-summary"),
-        Sense::hover(),
-    );
-    response.on_hover_text("Destination breakdown of captured TCP/UDP app traffic in the selected period and adapters. Its total can differ from overall interface usage. LAN includes local and private destinations; WAN covers public destinations. Other is unclassified address space.");
-    let bar = Rect::from_min_size(
-        rect.min + Vec2::new(0.0, 25.0),
-        Vec2::new(rect.width(), 8.0),
-    );
-    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    painter.rect_filled(bar, 4, widgets::border(ui));
+    ui.add_space(2.0);
+    let (bar, _) = ui.allocate_exact_size(Vec2::new(width, 8.0), Sense::hover());
     let fractions = segment_fractions(totals.lan, totals.wan, totals.unknown);
-    let colors = [download_color(ui), upload_color(ui), axis_color(ui)];
-    let mut offset = 0.0f32;
-    for (fraction, color) in fractions.into_iter().zip(colors) {
-        if fraction <= 0.0 {
-            continue;
-        }
-        let right = (offset + fraction).min(1.0);
-        let segment = Rect::from_min_max(
-            Pos2::new(bar.left() + bar.width() * offset, bar.top()),
-            Pos2::new(bar.left() + bar.width() * right, bar.bottom()),
-        );
-        let corners = egui::CornerRadius {
-            nw: if offset == 0.0 { 4 } else { 0 },
-            sw: if offset == 0.0 { 4 } else { 0 },
-            ne: if right >= 1.0 { 4 } else { 0 },
-            se: if right >= 1.0 { 4 } else { 0 },
-        };
-        painter.rect_filled(segment, corners, color);
-        offset = right;
-    }
+    let colors = [
+        p.text.gamma_multiply(0.4),
+        p.text.gamma_multiply(0.68),
+        p.text.gamma_multiply(0.2),
+    ];
+    widgets::split_bar(
+        ui.painter(),
+        bar,
+        &[
+            (fractions[0], colors[0]),
+            (fractions[1], colors[1]),
+            (fractions[2], colors[2]),
+        ],
+        p.raised,
+    );
+    ui.add_space(8.0);
     let count = if totals.unknown > 0 { 3 } else { 2 };
     let gap = 14.0;
-    let width = ((rect.width() - gap * (count - 1) as f32) / count as f32).floor();
+    let cell_width = ((width - gap * (count - 1) as f32) / count as f32).floor();
+    let (legend, _) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::hover());
     for (i, (name, value, color)) in [
         ("LAN", totals.lan, colors[0]),
         ("WAN", totals.wan, colors[1]),
@@ -335,42 +360,51 @@ pub fn destination_breakdown(ui: &mut egui::Ui, rect: Rect, totals: &ScopeTotals
     .take(count)
     .enumerate()
     {
-        let left = rect.left() + i as f32 * (width + gap);
-        let label = Rect::from_min_size(Pos2::new(left, rect.top() + 40.0), Vec2::new(width, 17.0));
-        widgets::text_at(
-            ui,
-            label,
-            egui::RichText::new(name).size(12.5).color(color),
-            egui::Align::Min,
+        let cell = Rect::from_min_size(
+            Pos2::new(legend.left() + i as f32 * (cell_width + gap), legend.top()),
+            Vec2::new(cell_width, legend.height()),
         );
-        if count == 2 {
-            widgets::text_at(
-                ui,
+        let painter = ui.painter();
+        painter.circle_filled(Pos2::new(cell.left() + 4.0, cell.top() + 9.0), 3.5, color);
+        let label = Rect::from_min_size(
+            Pos2::new(cell.left() + 14.0, cell.top()),
+            Vec2::new(cell.width() - 14.0, 18.0),
+        );
+        paint_text(painter, label, Align2::LEFT_CENTER, name, sans(13.0), p.dim);
+        if cell_width >= 118.0 {
+            paint_text(
+                painter,
                 label,
-                egui::RichText::new(share_label(fractions[i]))
-                    .size(12.0)
-                    .weak(),
-                egui::Align::Max,
-            );
-        } else {
-            widgets::text_at(
-                ui,
-                Rect::from_min_size(Pos2::new(left, rect.top() + 78.0), Vec2::new(width, 16.0)),
-                egui::RichText::new(share_label(fractions[i]))
-                    .size(12.0)
-                    .weak(),
-                egui::Align::Min,
+                Align2::RIGHT_CENTER,
+                &share_label(fractions[i]),
+                sans(12.0),
+                p.dim,
             );
         }
-        widgets::text_at(
-            ui,
-            Rect::from_min_size(Pos2::new(left, rect.top() + 60.0), Vec2::new(width, 18.0)),
-            egui::RichText::new(crate::model::format_compact_bytes(value))
-                .size(if count == 2 { 14.0 } else { 13.0 })
-                .strong(),
-            egui::Align::Min,
+        paint_text(
+            painter,
+            Rect::from_min_size(
+                cell.min + Vec2::new(0.0, 19.0),
+                Vec2::new(cell.width(), 20.0),
+            ),
+            Align2::LEFT_CENTER,
+            &format_compact_bytes(value),
+            bold(15.0),
+            p.text,
         );
     }
+    ui.interact(
+        head.union(legend),
+        ui.make_persistent_id("destination-summary"),
+        Sense::hover(),
+    )
+    .on_hover_text(format!(
+        "LAN {} · WAN {} · Other {}
+Destination breakdown of captured TCP/UDP app traffic in the selected period and adapters. Its total can differ from overall interface usage. LAN includes local and private destinations; WAN covers public destinations. Other is unclassified address space.",
+        share_label(fractions[0]),
+        share_label(fractions[1]),
+        share_label(fractions[2]),
+    ));
 }
 fn share_label(fraction: f32) -> String {
     if fraction <= 0.0 {
@@ -404,13 +438,6 @@ fn nice_maximum(value: u64) -> f64 {
         .map(|f| f * magnitude)
         .find(|v| *v >= target)
         .unwrap_or(target)
-}
-fn axis_color(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        Color32::from_gray(190)
-    } else {
-        Color32::from_gray(86)
-    }
 }
 fn speed_label(bytes: f64, bits: bool) -> String {
     if bits {

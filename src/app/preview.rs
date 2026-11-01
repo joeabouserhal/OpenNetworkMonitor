@@ -45,7 +45,6 @@ impl MonitorApp {
             app_search: String::new(),
             data_dir: PathBuf::from(r"C:\Users\Example\AppData\Local\OpenNetworkMonitor"),
             view_warning: String::new(),
-            show_graph_options: false,
             custom_period: None,
             app_cache: Arc::default(),
             app_cache_key: None,
@@ -284,44 +283,146 @@ impl MonitorApp {
 #[cfg(test)]
 mod render_tests {
     use super::*;
+
+    /// Scripted pointer input applied before a preview frame is captured.
+    enum Step {
+        Click(&'static str),
+        ClickAt(f32, f32),
+        Hover(f32, f32),
+    }
+    fn texts(out: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
+        fn collect(shape: &egui::Shape, into: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, into)),
+                egui::Shape::Text(t) => into.push((t.galley.job.text.clone(), t.pos)),
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        out.shapes.iter().for_each(|s| collect(&s.shape, &mut all));
+        all
+    }
+    fn press(pos: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
     #[test]
     #[ignore = "Exports the app's own headless egui geometry for offline visual review"]
     fn export_ui_review() {
         use std::collections::HashMap;
+        type Atlas = HashMap<String, ([usize; 2], Vec<[u8; 4]>)>;
+        fn apply_textures(textures: &mut Atlas, out: &mut egui::FullOutput) {
+            for (id, deltas) in &out.textures_delta.set {
+                for delta in deltas {
+                    let egui::ImageData::Color(image) = &delta.image;
+                    let key = format!("{id:?}");
+                    if let Some(offset) = delta.pos {
+                        let (target_size, target) = textures.get_mut(&key).unwrap();
+                        for y in 0..image.size[1] {
+                            for x in 0..image.size[0] {
+                                target[(offset[1] + y) * target_size[0] + offset[0] + x] =
+                                    image.pixels[y * image.size[0] + x].to_array();
+                            }
+                        }
+                    } else {
+                        textures.insert(
+                            key,
+                            (
+                                image.size,
+                                image.pixels.iter().map(|c| c.to_array()).collect(),
+                            ),
+                        );
+                    }
+                }
+            }
+            out.textures_delta.clear();
+        }
         let output_dir = PathBuf::from("target/ui-review");
         std::fs::create_dir_all(&output_dir).unwrap();
-        for (name, page, light, size) in [
-            ("apps", "apps", false, [1200.0, 820.0]),
-            ("apps-small", "apps", false, [960.0, 680.0]),
-            ("adapter-small", "overview", false, [960.0, 680.0]),
-            ("overall-other", "overview", false, [960.0, 680.0]),
+        let wide = widgets::DEFAULT_WINDOW_SIZE;
+        for (name, page, light, size, steps) in [
+            ("apps", "apps", false, [1200.0, 820.0], vec![]),
+            ("apps-small", "apps", false, [960.0, 680.0], vec![]),
+            ("adapter-small", "overview", false, [960.0, 680.0], vec![]),
+            ("overall-other", "overview", false, [960.0, 680.0], vec![]),
+            ("overall-smooth", "overview", false, wide, vec![]),
+            ("overall-wide", "overview", false, wide, vec![]),
+            ("connections", "connections", false, [1200.0, 820.0], vec![]),
+            ("adapters", "adapters", false, [960.0, 680.0], vec![]),
+            ("settings", "settings", false, [1200.0, 820.0], vec![]),
+            ("apps-light", "apps", true, [1200.0, 820.0], vec![]),
+            ("overall-light", "overview", true, wide, vec![]),
+            ("period-dates", "overview", false, [960.0, 680.0], vec![]),
             (
-                "overall-smooth",
+                "period-dates-light",
                 "overview",
-                false,
-                widgets::DEFAULT_WINDOW_SIZE,
+                true,
+                [960.0, 680.0],
+                vec![],
+            ),
+            ("period-rolling", "overview", false, [960.0, 680.0], vec![]),
+            (
+                "period-rolling-light",
+                "overview",
+                true,
+                [960.0, 680.0],
+                vec![],
             ),
             (
-                "overall-wide",
+                "menu-period",
                 "overview",
                 false,
-                widgets::DEFAULT_WINDOW_SIZE,
+                wide,
+                vec![Step::Click("Period")],
             ),
-            ("connections", "connections", false, [1200.0, 820.0]),
-            ("adapters", "adapters", false, [960.0, 680.0]),
-            ("settings", "settings", false, [1200.0, 820.0]),
-            ("apps-light", "apps", true, [1200.0, 820.0]),
-            ("period-dates", "overview", false, [960.0, 680.0]),
-            ("period-dates-light", "overview", true, [960.0, 680.0]),
-            ("period-rolling", "overview", false, [960.0, 680.0]),
-            ("period-rolling-light", "overview", true, [960.0, 680.0]),
+            (
+                "menu-adapters",
+                "apps",
+                false,
+                wide,
+                vec![Step::Click("Adapters")],
+            ),
+            (
+                "menu-networks-light",
+                "apps",
+                true,
+                wide,
+                vec![Step::Click("Networks")],
+            ),
+            (
+                "menu-chart",
+                "overview",
+                false,
+                wide,
+                vec![Step::ClickAt(1205.0, 169.0)],
+            ),
+            (
+                "hover-chart",
+                "overview",
+                false,
+                wide,
+                vec![Step::Hover(1178.0, 444.0)],
+            ),
+            (
+                "calendar",
+                "overview",
+                false,
+                [960.0, 680.0],
+                vec![Step::ClickAt(621.0, 372.0)],
+            ),
         ] {
             let ctx = egui::Context::default();
             let mut app = MonitorApp::preview(&ctx, page, light);
-            if name.starts_with("period-") {
+            if name.starts_with("period-") || name == "calendar" {
                 let filter = Filter {
                     seconds: 86400,
-                    time_range: if name.starts_with("period-dates") {
+                    time_range: if name.starts_with("period-dates") || name == "calendar" {
                         Some(TimeRange {
                             start: 1782864000,
                             end: 1782950399,
@@ -345,48 +446,61 @@ mod render_tests {
             }
             let mut textures = HashMap::<String, ([usize; 2], Vec<[u8; 4]>)>::new();
             let mut geometry = Vec::new();
-            for _ in 0..3 {
-                let mut out = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            Vec2::from(size) / app.settings.ui_scale,
-                        )),
-                        ..Default::default()
-                    },
-                    |root| {
-                        app.draw(root);
-                    },
-                );
-                for (id, deltas) in &out.textures_delta.set {
-                    for delta in deltas {
-                        let egui::ImageData::Color(image) = &delta.image;
-                        let key = format!("{id:?}");
-                        if let Some(offset) = delta.pos {
-                            let (target_size, target) = textures.get_mut(&key).unwrap();
-                            for y in 0..image.size[1] {
-                                for x in 0..image.size[0] {
-                                    target[(offset[1] + y) * target_size[0] + offset[0] + x] =
-                                        image.pixels[y * image.size[0] + x].to_array();
-                                }
-                            }
-                        } else {
-                            textures.insert(
-                                key,
-                                (
-                                    image.size,
-                                    image.pixels.iter().map(|c| c.to_array()).collect(),
-                                ),
-                            );
+            let mut last_text: Vec<(String, egui::Pos2)> = Vec::new();
+            let mut clock = 0.0;
+            let mut hover = None;
+            let input = |app: &MonitorApp, clock: f64, events: Vec<egui::Event>| egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::from(size) / app.settings.ui_scale,
+                )),
+                time: Some(clock),
+                events,
+                ..Default::default()
+            };
+            // Settle layout for three frames, then run each scripted step followed by three more.
+            for frame in 0..3 + steps.len() * 3 {
+                let mut events = Vec::new();
+                if frame >= 3 && (frame - 3) % 3 == 0 {
+                    match &steps[(frame - 3) / 3] {
+                        Step::Click(label) => {
+                            let at = last_text
+                                .iter()
+                                .rfind(|(text, _)| text == label)
+                                .unwrap_or_else(|| panic!("Missing {label}"))
+                                .1;
+                            events = press(at + Vec2::new(4.0, 5.0));
+                        }
+                        Step::ClickAt(x, y) => events = press(egui::pos2(*x, *y)),
+                        Step::Hover(x, y) => {
+                            let pos = egui::pos2(*x, *y);
+                            hover = Some(pos);
+                            events = vec![egui::Event::PointerMoved(pos)];
                         }
                     }
                 }
+                clock += if frame >= 3 { 0.25 } else { 0.05 };
+                let mut out = ctx.run_ui(input(&app, clock, events), |root| {
+                    app.draw(root);
+                });
+                if hover.is_some() {
+                    // egui restarts its tooltip timer on every move event, so hold the pointer
+                    // still while time advances past the tooltip delay.
+                    for _ in 0..4 {
+                        apply_textures(&mut textures, &mut out);
+                        clock += 0.3;
+                        out = ctx.run_ui(input(&app, clock, vec![]), |root| {
+                            app.draw(root);
+                        });
+                    }
+                }
+                last_text = texts(&out);
+                apply_textures(&mut textures, &mut out);
                 let primitives = ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
                 geometry=primitives.into_iter().filter_map(|p|match p.primitive {
                     egui::epaint::Primitive::Mesh(mesh)=>Some(serde_json::json!({"clip":[p.clip_rect.min.x*out.pixels_per_point,p.clip_rect.min.y*out.pixels_per_point,p.clip_rect.max.x*out.pixels_per_point,p.clip_rect.max.y*out.pixels_per_point],"texture":format!("{:?}",mesh.texture_id),"vertices":mesh.vertices.iter().map(|v|(v.pos.x*out.pixels_per_point,v.pos.y*out.pixels_per_point,v.uv.x,v.uv.y,v.color.to_array())).collect::<Vec<_>>(),"indices":mesh.indices})),
                     _=>None,
                 }).collect();
-                out.textures_delta.clear();
             }
             let texture_json: Vec<_> = textures
                 .into_iter()
@@ -403,9 +517,12 @@ mod render_tests {
                 .collect();
             std::fs::write(
                 output_dir.join(format!("{name}.json")),
-                serde_json::to_vec(
-                    &serde_json::json!({"size":size,"textures":texture_json,"meshes":geometry}),
-                )
+                serde_json::to_vec(&serde_json::json!({
+                    "size":size,
+                    "background":ctx.global_style().visuals.panel_fill.to_array(),
+                    "textures":texture_json,
+                    "meshes":geometry,
+                }))
                 .unwrap(),
             )
             .unwrap();

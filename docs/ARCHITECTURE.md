@@ -8,10 +8,11 @@ The desktop executable has a single collector thread and an egui/eframe UI threa
 - `capture/etw.rs`: uniquely named, app-owned ETW session; TCP and UDP providers; bounded nonblocking queue; decode/drop/kernel-loss counters. Capture never stops another program's trace session.
 - `worker.rs`: sampling, endpoint aggregation, offline geolocation, SQLite writes, filter queries, export and retention. Rendering can stop while collection continues.
 - `store.rs`: SQLite WAL mode, transactional minute upserts, gap-aware chart series, filtered export with formula escaping. Failed writes are retained for retry up to a bounded row limit, after which a persistent warning reports that history stopped.
-- `graph.rs`: custom egui plot with direction toggles, log scale, time labels, hover and drag zoom.
+- `graph.rs`: custom egui plot with direction toggles, log scale, time labels and a hover crosshair with tooltip, plus the LAN/WAN destination breakdown.
+- `widgets.rs`: the design system: palette tokens, typography, icons and the shared controls (see v0.4 below).
 - `icons.rs`: bounded, background Windows executable icon extraction and cached egui textures for visible app rows. Missing icons use a fallback and can be retried.
 - `tray.rs`: native tray icon/menu, direct Exit and UI wake-up.
-- `app.rs`: screens, themes, view state and persisted preferences.
+- `app.rs`: view state, filters, caches and persisted preferences. Pages live in `app/`: `shell` (sidebar, header, banners), `overall`, `apps`, `connections`, `adapters`, `settings_page`, `filters` (period/adapter/network popovers), `period` (custom period dialog) and `theme` (the four palettes).
 - `main.rs`: startup, local data path, diagnostics and generated-traffic verification.
 
 ## Measurement contract
@@ -64,7 +65,7 @@ Only Overview, Connections, Adapters and Settings are navigation destinations. O
 
 widgets.rs centralizes panel borders/margins, badges, text placement, focus-visible navigation and integer column geometry. Three-column layouts allocate exact widths rather than multiplying fractional minimum widths; this avoids border expansion at the minimum window size. App rows use 15.5-point names, 17-point totals, 13.5-point directory subtitles and separately labeled/color-coded Down/Up values. Hover details retain full paths and current rates. Keyboard focus is visible on navigation and app rows.
 
-Connections virtualizes a fixed six-column table; PID/folder information sits below the app name. Long endpoints truncate within their own cells and remain available in tooltips. Adapters and Settings each own a vertical scroll region. Adapter status/action slots have fixed widths, and View traffic selects that adapter in Overview. Settings uses the same full-width surfaces, with measurement detail collapsed initially. CSV remains tied to the Overview context, so its button appears in Overview and the Settings history section.
+Connections virtualizes a fixed six-column table with 54-point rows and 4-point gaps; PID/folder information sits below the app name. Long endpoints truncate within their own cells and remain available in tooltips. Adapters and Settings each own a vertical scroll region. Adapter status/action slots have fixed widths, and View traffic selects that adapter in Overview. Settings uses the same full-width surfaces, with measurement detail collapsed initially. CSV remains tied to the Overview context, so its button appears in Overview and the Settings history section.
 
 The ui-preview feature and examples/ui_preview.rs are development-only fixtures without capture or database access. The ignored export_ui_review test exports actual tessellated meshes and texture atlases. scripts/render_ui.py rasterizes these offscreen using NumPy/Pillow; it does not capture or control desktop windows.
 
@@ -113,3 +114,15 @@ The period dropdown uses compact 24-point buttons with 2-point gaps. The month-t
 ## Executable icon
 
 src/app_icon.rs defines the shared bar artwork for the tray, window and executable. build.rs generates a transparent ICO with 16/24/32/48/64/128/256-pixel entries and embeds it as Windows icon resource 1, scoped to the desktop binary. The existing 32-pixel runtime artwork is preserved. The icon resource is compiled separately from the administrator manifest so both remain present in the final executable.
+
+## v0.4 visual redesign
+
+The interface was rewritten for a modern, minimal look without touching capture, storage or byte accounting. widgets.rs is now the design system. A `Palette` of colour tokens (canvas, card, raised, sunken, hairline, text, dim, accent, soft accent, download, upload and status colours) is stored in the egui context by `Theme::apply`; every control reads it through `pal(ui)`, so the four themes cannot drift apart. Saved theme names (Dark, Light, Nord, Mocha) are unchanged. The chrome is monochrome and colour is reserved for data: download and upload use a blue/orange pair, which stays distinguishable for colour-blind users, and LAN/WAN uses a grey ramp so it is never confused with direction. Text and data colours keep at least 4.5:1 contrast on the canvas, card, raised and selected surfaces in every palette (tested).
+
+Typography uses Segoe UI Regular, Semibold and Light plus Cascadia Mono when installed, registered as the `semibold()` and `light()` font families with egui's bundled fonts as fallback. egui's own `strong()` only changes colour, so weights are real fonts now: Light numerals with a quieter unit for speeds and totals, Semibold for titles and row names.
+
+Controls are painted directly instead of styled from egui defaults: pill filter chips that open popovers (a quick-range grid for periods, check rows for adapters), a segmented control with a sliding selection, switches, a slider, a search field, ghost/secondary/primary buttons and line icons drawn with the painter. Rows paint their text without allocating widgets, so labels never swallow clicks. App icons sit in rounded tiles; executables without an icon get a coloured initial.
+
+Layout. The sidebar collapses to an icon rail below 1100 logical points. Overview is a chart card beside a 316-point summary rail (period totals, LAN/WAN and the top five apps); series are toggled from the chart legend and chart options are a popover. App traffic keeps the three independent virtualized lists in weighted columns (Apps wider than Hosts and Traffic type) with a summary strip beneath. Each row shows a slim bar that ranks it against the busiest row and splits it by direction, with Down/Up values on the second line. Connections uses 52-point rows with protocol pills and a status dot, Adapters is a two-column card grid, and Settings is a centred 820-point column of grouped rows. Pages with fixed-height layouts zero egui's per-widget vertical spacing and budget their gaps explicitly.
+
+The custom period dialog and calendar share the same tokens. Tests cover bounds at every supported size, theme and interface scale, the collapsing sidebar, filter popovers, the source switch, legend toggles and the settings controls; the offscreen renderer in scripts/render_ui.py is unchanged.

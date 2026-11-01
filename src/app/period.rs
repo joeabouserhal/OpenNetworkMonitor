@@ -31,14 +31,6 @@ pub(super) fn period_caption(filter: &Filter) -> &'static str {
     }
 }
 
-pub(super) fn choice(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::selectable(selected, RichText::new(label).size(14.0))
-            .small()
-            .min_size(Vec2::new(0.0, 24.0)),
-    )
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum PeriodMode {
     Rolling,
@@ -176,18 +168,14 @@ impl DateTimeFields {
 }
 impl CustomPeriod {
     fn contents(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        let p = widgets::pal(ui);
         let mut cancel = false;
         ui.set_width(MODAL_WIDTH);
         ui.spacing_mut().item_spacing = Vec2::new(10.0, 10.0);
-        ui.spacing_mut().button_padding = Vec2::new(12.0, 8.0);
-        ui.spacing_mut().interact_size.y = 32.0;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Custom period").size(22.0).strong());
+            ui.label(widgets::strong_text("Custom period", 22.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                cancel |= ui
-                    .add(egui::Button::new("×").frame(false))
-                    .on_hover_text("Close")
-                    .clicked();
+                cancel |= widgets::icon_button(ui, widgets::Icon::Close, "Close").clicked();
             });
         });
         ui.label(
@@ -195,33 +183,19 @@ impl CustomPeriod {
                 .size(13.5)
                 .weak(),
         );
-        ui.add_space(2.0);
-        egui::Frame::new()
-            .fill(ui.visuals().extreme_bg_color)
-            .corner_radius(8)
-            .inner_margin(4)
-            .show(ui, |ui| {
-                let width = (ui.available_width() - 4.0) / 2.0;
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.horizontal(|ui| {
-                    for (mode, label) in [
-                        (PeriodMode::Rolling, "Rolling window"),
-                        (PeriodMode::Dates, "Date range"),
-                    ] {
-                        if ui
-                            .add_sized(
-                                [width, 34.0],
-                                egui::Button::new(label).selected(self.mode == mode),
-                            )
-                            .clicked()
-                        {
-                            self.mode = mode;
-                            self.error.clear();
-                        }
-                    }
-                });
-            });
         ui.add_space(4.0);
+        if widgets::segmented(
+            ui,
+            "period-mode",
+            &mut self.mode,
+            &[
+                (PeriodMode::Rolling, "Rolling window"),
+                (PeriodMode::Dates, "Date range"),
+            ],
+        ) {
+            self.error.clear();
+        }
+        ui.add_space(6.0);
         ui.allocate_ui_with_layout(
             Vec2::new(MODAL_WIDTH, MODAL_BODY_HEIGHT),
             egui::Layout::top_down(egui::Align::Min),
@@ -230,26 +204,32 @@ impl CustomPeriod {
                 self.fields(ui);
             },
         );
-        ui.separator();
+        widgets::divider(ui);
+        ui.add_space(2.0);
         let mut apply = false;
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("Applies to both traffic views")
-                    .size(12.0)
-                    .weak(),
+                    .size(12.5)
+                    .color(p.dim),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                apply = ui
-                    .add_sized(
-                        [106.0, 34.0],
-                        egui::Button::new(RichText::new("Apply").strong())
-                            .fill(ui.visuals().selection.bg_fill)
-                            .stroke(ui.visuals().selection.stroke),
-                    )
-                    .clicked();
-                cancel |= ui
-                    .add_sized([76.0, 34.0], egui::Button::new("Cancel"))
-                    .clicked();
+                apply = widgets::button_with(
+                    ui,
+                    widgets::ButtonKind::Primary,
+                    None,
+                    "Apply",
+                    Some(96.0),
+                )
+                .clicked();
+                cancel |= widgets::button_with(
+                    ui,
+                    widgets::ButtonKind::Ghost,
+                    None,
+                    "Cancel",
+                    Some(80.0),
+                )
+                .clicked();
             });
         });
         (apply, cancel)
@@ -258,56 +238,27 @@ impl CustomPeriod {
 impl CustomPeriod {
     fn fields(&mut self, ui: &mut egui::Ui) {
         if self.mode == PeriodMode::Rolling {
-            field_headers(ui, "AMOUNT", "UNIT");
-            ui.horizontal(|ui| {
-                row_label(ui, "Last");
-                input_frame(ui).show(ui, |ui| {
-                    ui.set_width(270.0);
-                    ui.set_min_height(32.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.amount)
-                            .font(egui::FontId::monospace(14.0))
-                            .hint_text("e.g. 30")
-                            .char_limit(10)
-                            .desired_width(270.0)
-                            .frame(egui::Frame::NONE),
-                    );
-                });
-                ui.scope(|ui| {
-                    ui.spacing_mut().button_padding = Vec2::new(10.0, 8.0);
-                    ui.spacing_mut().interact_size.y = 50.0;
-                    ui.spacing_mut().icon_width = 20.0;
-                    ui.spacing_mut().icon_spacing = 4.0;
-                    let fill = ui.visuals().extreme_bg_color;
-                    let border = widgets::border(ui);
-                    let accent = ui.visuals().selection.stroke;
-                    let widgets = &mut ui.visuals_mut().widgets;
-                    for visual in [
-                        &mut widgets.inactive,
-                        &mut widgets.hovered,
-                        &mut widgets.active,
-                        &mut widgets.open,
-                    ] {
-                        visual.bg_fill = fill;
-                        visual.weak_bg_fill = fill;
-                        visual.bg_stroke = egui::Stroke::new(1.0, border);
-                        visual.corner_radius = 6.into();
-                    }
-                    widgets.hovered.bg_stroke = accent;
-                    widgets.open.bg_stroke = accent;
-                    egui::ComboBox::from_id_salt("custom-duration-unit")
-                        .width(104.0)
-                        .selected_text(RichText::new(self.unit.label()).monospace().size(14.0))
-                        .wrap_mode(egui::TextWrapMode::Truncate)
-                        .show_ui(ui, |ui| {
-                            for unit in Unit::ALL {
-                                ui.selectable_value(&mut self.unit, unit, unit.label());
-                            }
-                        });
-                });
+            field_header(ui, "AMOUNT");
+            input_frame(ui).show(ui, |ui| {
+                ui.set_width(MODAL_WIDTH - 26.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.amount)
+                        .font(widgets::mono(14.0))
+                        .hint_text("e.g. 30")
+                        .char_limit(10)
+                        .desired_width(MODAL_WIDTH - 26.0)
+                        .frame(egui::Frame::NONE),
+                );
             });
+            field_header(ui, "UNIT");
+            widgets::segmented(
+                ui,
+                "period-unit",
+                &mut self.unit,
+                &Unit::ALL.map(|unit| (unit, unit.label())),
+            );
         } else {
-            field_headers(ui, "DATE", "TIME");
+            field_header(ui, "DATE AND TIME");
             let _ = date_time_row(ui, "From", &mut self.from);
             let _ = date_time_row(ui, "To", &mut self.to);
         }
@@ -339,53 +290,49 @@ impl CustomPeriod {
     }
 }
 fn input_frame(ui: &egui::Ui) -> egui::Frame {
+    let p = widgets::pal(ui);
     egui::Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
-        .stroke(egui::Stroke::new(1.0, widgets::border(ui)))
-        .corner_radius(6)
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .fill(p.sunken)
+        .stroke(egui::Stroke::new(1.0, p.hairline))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(12, 8))
 }
 fn row_label(ui: &mut egui::Ui, label: &str) {
     ui.allocate_ui_with_layout(
-        Vec2::new(44.0, 38.0),
+        Vec2::new(44.0, 40.0),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.set_min_size(Vec2::new(44.0, 38.0));
-            ui.label(RichText::new(label).size(13.5).strong());
+            ui.set_min_size(Vec2::new(44.0, 40.0));
+            ui.label(widgets::strong_text(label, 13.5));
         },
     );
 }
-fn field_headers(ui: &mut egui::Ui, first: &str, second: &str) {
-    ui.horizontal(|ui| {
-        ui.allocate_space(Vec2::new(44.0, 14.0));
-        ui.allocate_ui_with_layout(
-            Vec2::new(292.0, 14.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.set_min_width(292.0);
-                ui.label(RichText::new(first).size(11.0).weak());
-            },
-        );
-        ui.label(RichText::new(second).size(11.0).weak());
-    });
+fn field_header(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(text)
+            .font(widgets::bold(11.5))
+            .color(widgets::pal(ui).dim),
+    );
 }
 
 fn date_time_row(ui: &mut egui::Ui, label: &str, fields: &mut DateTimeFields) -> egui::Response {
     ui.push_id(label, |ui| {
         ui.horizontal(|ui| {
+            ui.set_min_height(40.0);
             row_label(ui, label);
-            let width = 292.0;
+            let width = 286.0;
             let calendar = input_frame(ui)
                 .show(ui, |ui| {
-                    ui.set_width(width - 22.0);
+                    ui.set_width(width - 24.0);
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut fields.date)
-                                .font(egui::FontId::monospace(14.0))
+                                .font(widgets::mono(14.0))
                                 .hint_text("YYYY-MM-DD")
                                 .char_limit(10)
-                                .desired_width(width - 48.0)
+                                .desired_width(width - 52.0)
                                 .frame(egui::Frame::NONE),
                         );
                         calendar_button(ui)
@@ -400,12 +347,13 @@ fn date_time_row(ui: &mut egui::Ui, label: &str, fields: &mut DateTimeFields) ->
             }
             egui::Popup::menu(&calendar)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .gap(6.0)
                 .show(|ui| calendar_contents(ui, fields));
             input_frame(ui).show(ui, |ui| {
                 ui.set_width(82.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut fields.time)
-                        .font(egui::FontId::monospace(14.0))
+                        .font(widgets::mono(14.0))
                         .hint_text("HH:MM")
                         .char_limit(5)
                         .desired_width(82.0)
@@ -419,23 +367,24 @@ fn date_time_row(ui: &mut egui::Ui, label: &str, fields: &mut DateTimeFields) ->
     .inner
 }
 fn calendar_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(22.0, 20.0), egui::Sense::click());
+    let p = widgets::pal(ui);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(24.0, 22.0), egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Choose date")
     });
     let stroke = egui::Stroke::new(
-        1.3,
+        1.4,
         if response.hovered() || response.has_focus() {
-            ui.visuals().selection.stroke.color
+            p.accent
         } else {
-            ui.visuals().weak_text_color()
+            p.dim
         },
     );
-    let icon = egui::Rect::from_center_size(rect.center(), Vec2::new(14.0, 13.0));
+    let icon = egui::Rect::from_center_size(rect.center(), Vec2::new(15.0, 14.0));
     ui.painter()
-        .rect_stroke(icon, 2, stroke, egui::StrokeKind::Inside);
-    ui.painter().hline(icon.x_range(), icon.top() + 4.0, stroke);
-    for x in [icon.left() + 4.0, icon.right() - 4.0] {
+        .rect_stroke(icon, 3, stroke, egui::StrokeKind::Inside);
+    ui.painter().hline(icon.x_range(), icon.top() + 4.5, stroke);
+    for x in [icon.left() + 4.5, icon.right() - 4.5] {
         ui.painter()
             .vline(x, icon.top() - 2.0..=icon.top() + 2.0, stroke);
     }
@@ -443,42 +392,86 @@ fn calendar_button(ui: &mut egui::Ui) -> egui::Response {
         .on_hover_text("Choose date")
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+fn day_cell(ui: &mut egui::Ui, label: &str, selected: bool, today: bool) -> egui::Response {
+    let p = widgets::pal(ui);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), egui::Sense::click());
+    let body = rect.shrink(1.0);
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(body, widgets::radius(8.0), p.accent);
+    } else if response.hovered() {
+        painter.rect_filled(body, widgets::radius(8.0), p.raised);
+    }
+    if today && !selected {
+        painter.rect_stroke(
+            body,
+            widgets::radius(8.0),
+            egui::Stroke::new(1.0, p.accent.gamma_multiply(0.7)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    widgets::paint_text(
+        painter,
+        rect,
+        egui::Align2::CENTER_CENTER,
+        label,
+        if selected {
+            widgets::bold(13.5)
+        } else {
+            widgets::sans(13.5)
+        },
+        if selected { p.accent_ink } else { p.text },
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
 fn calendar_contents(ui: &mut egui::Ui, fields: &mut DateTimeFields) {
-    ui.set_width(238.0);
-    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+    let p = widgets::pal(ui);
+    ui.set_width(238.0 + 22.0);
+    ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                fields.month.year() > 1970 || fields.month.month() > 1,
-                egui::Button::new("‹"),
-            )
-            .clicked()
-            && let Some(month) = fields.month.checked_sub_months(Months::new(1))
-        {
-            fields.month = month;
-        }
-        ui.allocate_ui_with_layout(
-            Vec2::new(172.0, 26.0),
-            egui::Layout::top_down(egui::Align::Center),
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.add_enabled_ui(
+            fields.month.year() > 1970 || fields.month.month() > 1,
             |ui| {
-                ui.label(RichText::new(fields.month.format("%B %Y").to_string()).strong());
+                if widgets::button_with(ui, widgets::ButtonKind::Ghost, None, "‹", Some(32.0))
+                    .clicked()
+                    && let Some(month) = fields.month.checked_sub_months(Months::new(1))
+                {
+                    fields.month = month;
+                }
             },
         );
-        if ui.button("›").clicked()
+        let (title, _) = ui.allocate_exact_size(Vec2::new(150.0, 32.0), egui::Sense::hover());
+        widgets::paint_text(
+            ui.painter(),
+            title,
+            egui::Align2::CENTER_CENTER,
+            &fields.month.format("%B %Y").to_string(),
+            widgets::bold(14.0),
+            p.text,
+        );
+        if widgets::button_with(ui, widgets::ButtonKind::Ghost, None, "›", Some(32.0)).clicked()
             && let Some(month) = fields.month.checked_add_months(Months::new(1))
         {
             fields.month = month;
         }
     });
+    ui.add_space(4.0);
     let selected = NaiveDate::parse_from_str(&fields.date, "%Y-%m-%d").ok();
+    let today = Local::now().date_naive();
     let offset = fields.month.weekday().num_days_from_monday();
     egui::Grid::new("calendar-days")
-        .spacing([4.0, 4.0])
+        .spacing([2.0, 2.0])
         .show(ui, |ui| {
             for day in ["M", "T", "W", "T", "F", "S", "S"] {
-                ui.add_sized(
-                    [30.0, 20.0],
-                    egui::Label::new(RichText::new(day).size(11.0).weak()),
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(32.0, 22.0), egui::Sense::hover());
+                widgets::paint_text(
+                    ui.painter(),
+                    rect,
+                    egui::Align2::CENTER_CENTER,
+                    day,
+                    widgets::bold(11.5),
+                    p.dim,
                 );
             }
             ui.end_row();
@@ -487,28 +480,29 @@ fn calendar_contents(ui: &mut egui::Ui, fields: &mut DateTimeFields) {
                     .checked_sub(offset)
                     .and_then(|day| fields.month.with_day(day + 1));
                 if let Some(date) = date {
-                    if ui
-                        .add_sized(
-                            [30.0, 28.0],
-                            egui::Button::new(date.day().to_string())
-                                .selected(selected == Some(date)),
-                        )
-                        .clicked()
+                    if day_cell(
+                        ui,
+                        &date.day().to_string(),
+                        selected == Some(date),
+                        date == today,
+                    )
+                    .clicked()
                     {
                         fields.date = date.format("%Y-%m-%d").to_string();
                         ui.close();
                     }
                 } else {
-                    ui.allocate_space(Vec2::new(30.0, 28.0));
+                    ui.allocate_space(Vec2::new(32.0, 30.0));
                 }
                 if cell % 7 == 6 {
                     ui.end_row();
                 }
             }
         });
-    ui.separator();
-    if ui.button("Today").clicked() {
-        let today = Local::now().date_naive();
+    ui.add_space(6.0);
+    widgets::divider(ui);
+    ui.add_space(4.0);
+    if widgets::button(ui, widgets::ButtonKind::Ghost, "Today").clicked() {
         fields.date = today.format("%Y-%m-%d").to_string();
         fields.month = today.with_day(1).unwrap();
         ui.close();
@@ -523,8 +517,8 @@ impl MonitorApp {
             .area(egui::Modal::default_area(egui::Id::new("custom-period-dialog")).fade_in(false))
             .frame(
                 egui::Frame::window(&ctx.global_style())
-                    .inner_margin(20)
-                    .corner_radius(12),
+                    .inner_margin(24)
+                    .corner_radius(18),
             )
             .show(ctx, |ui| draft.contents(ui));
         let (apply, cancel) = response.inner;

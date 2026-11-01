@@ -12,7 +12,7 @@ Seven live-machine probes are ignored by default. They read Windows startup stat
 
 ## UI review
 
-The production egui layout is checked at supported window sizes, all four palettes and 80–110% interface size. Pointer-event tests cover navigation, app selection/clearing, period and network changes, and multi-adapter selection. An optional offscreen renderer produces sample-data previews without desktop capture or user history; see the README's UI development section. Repository screenshots use generated data.
+The production egui layout is checked at supported window sizes, all four palettes and 80–110% interface size. Pointer-event tests cover navigation (including the collapsed icon rail), the Overall/App traffic switch, chart legend toggles, app selection/clearing, period and network changes, multi-adapter selection, and the theme, speed-unit and interface-size settings. An optional offscreen renderer produces sample-data previews without desktop capture or user history; see the README's UI development section. Repository screenshots use generated data.
 
 ## Measurement and validation limits
 
@@ -27,6 +27,6 @@ Traffic databases, journals, capture traces, exports, private local diagnostics 
 
 Custom period styling was reviewed through sample-data Slate and Light renders. Calendar interaction checks cover choosing a leap day without closing the parent dialog. The native startup definition/status probe passed without registering or executing a task; a real sign-in cycle has not been exercised.
 
-Rolling and date-range modes share the same outlined input styling and fixed dialog body. Geometry checks confirm equal dialog size with and without validation messages in all four themes at 80% and 110% interface size.
+Rolling and date-range modes share the same sunken input styling and fixed dialog body. Geometry checks confirm equal dialog size with and without validation messages in all four themes at 80% and 110% interface size.
 
 Period menu rows use compact spacing. Month-to-date uses local calendar boundaries and is tested for month/year rollover, saved selection, and matching history, summaries and CSV. The redundant rolling end-time row is removed and the fixed dialog body is smaller.
