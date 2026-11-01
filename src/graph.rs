@@ -309,6 +309,9 @@ fn observed_runs(points: &[Point], window: (i64, i64)) -> Vec<Vec<&Point>> {
     }
     runs
 }
+/// Height `destination_breakdown` occupies: heading, bar and a two-line legend.
+pub const DESTINATION_HEIGHT: f32 = 78.0;
+
 /// Destination bytes are captured app transfers, separate from overall interface totals.
 /// Greys keep download/upload blue and orange meaning only direction.
 pub fn destination_breakdown(ui: &mut egui::Ui, totals: &ScopeTotals) {

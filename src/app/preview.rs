@@ -354,6 +354,7 @@ mod render_tests {
             ("overall-other", "overview", false, [960.0, 680.0], vec![]),
             ("overall-smooth", "overview", false, wide, vec![]),
             ("overall-wide", "overview", false, wide, vec![]),
+            ("overall-no-apps", "overview", false, wide, vec![]),
             ("connections", "connections", false, [1200.0, 820.0], vec![]),
             ("adapters", "adapters", false, [960.0, 680.0], vec![]),
             ("settings", "settings", false, [1200.0, 820.0], vec![]),
@@ -439,6 +440,9 @@ mod render_tests {
                 app.settings.filter.seconds = 300;
                 let history = Arc::make_mut(&mut app.data.history);
                 history.window_start = history.window_end - 300;
+            }
+            if name == "overall-no-apps" {
+                app.data.top_apps.clear();
             }
             if name == "overall-other" {
                 let other = app.data.classified.wan / 10;

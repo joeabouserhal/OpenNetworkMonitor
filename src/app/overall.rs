@@ -14,6 +14,13 @@ impl MonitorApp {
     }
     /// Fixed height of the sections inside the summary card, so the chart can take the rest.
     pub(super) const SUMMARY_CONTENT_HEIGHT: f32 = 138.0;
+
+    /// Space above a section whose content is `content` tall so it sits centred in its cell.
+    pub(super) fn centred(content: f32) -> f32 {
+        ((Self::SUMMARY_CONTENT_HEIGHT - content) / 2.0)
+            .max(0.0)
+            .floor()
+    }
     const SUMMARY_GAP: f32 = 12.0;
 
     pub(super) fn adapter_overview(&mut self, ui: &mut egui::Ui) {
@@ -27,10 +34,32 @@ impl MonitorApp {
         self.summary_card(ui);
     }
 
+    /// Highest download and upload speeds among the chart's observed samples, or None
+    /// when the period has none. Frozen charts report the frozen samples.
+    pub(super) fn peak_rates(&self) -> (Option<f64>, Option<f64>) {
+        let (start, end) = self.chart_window();
+        let points = self
+            .frozen
+            .as_ref()
+            .map_or(&self.data.history.points, |frozen| &frozen.points);
+        let mut peaks = (None::<u64>, None::<u64>);
+        for point in points
+            .iter()
+            .filter(|p| p.observed && (start..=end).contains(&p.timestamp))
+        {
+            peaks.0 = Some(peaks.0.map_or(point.down, |peak| peak.max(point.down)));
+            peaks.1 = Some(peaks.1.map_or(point.up, |peak| peak.max(point.up)));
+        }
+        (peaks.0.map(|v| v as f64), peaks.1.map(|v| v as f64))
+    }
+
     fn chart_card(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
         let (live_down, live_up) = self.live_rates(Source::Adapter);
         let (down_text, up_text) = (self.rate(live_down), self.rate(live_up));
+        let (peak_down, peak_up) = self.peak_rates();
+        let peak_text = |peak: Option<f64>| peak.map_or_else(|| "—".to_owned(), |v| self.rate(v));
+        let (peak_down_text, peak_up_text) = (peak_text(peak_down), peak_text(peak_up));
         let frame = widgets::surface(ui);
         widgets::surface_fill(ui, frame, |ui| {
             ui.horizontal_top(|ui| {
@@ -39,11 +68,18 @@ impl MonitorApp {
                     ui,
                     "legend-down",
                     "Download",
-                    &down_text,
+                    (&down_text, &peak_down_text),
                     p.down,
                     &mut self.show_down,
                 );
-                series_toggle(ui, "legend-up", "Upload", &up_text, p.up, &mut self.show_up);
+                series_toggle(
+                    ui,
+                    "legend-up",
+                    "Upload",
+                    (&up_text, &peak_up_text),
+                    p.up,
+                    &mut self.show_up,
+                );
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     let more = widgets::icon_button(ui, Icon::More, "Chart options");
@@ -101,6 +137,7 @@ impl MonitorApp {
                 |cols| {
                     let [totals, destinations, apps] = cols;
                     self.totals_section(totals);
+                    destinations.add_space(Self::centred(crate::graph::DESTINATION_HEIGHT));
                     crate::graph::destination_breakdown(destinations, &self.data.classified);
                     self.top_apps_section(apps);
                     for (left, right) in [(&*totals, &*destinations), (&*destinations, &*apps)] {
@@ -119,6 +156,11 @@ impl MonitorApp {
     fn totals_section(&self, ui: &mut egui::Ui) {
         let p = pal(ui);
         let width = ui.available_width();
+        // Narrow sections stack the two totals instead of squeezing them.
+        let side_by_side = width >= 240.0;
+        ui.add_space(Self::centred(
+            22.0 + 8.0 + if side_by_side { 54.0 } else { 108.0 },
+        ));
         let (head, _) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::hover());
         paint_text(
             ui.painter(),
@@ -129,8 +171,6 @@ impl MonitorApp {
             p.text,
         );
         ui.add_space(8.0);
-        // Narrow sections stack the two totals instead of squeezing them.
-        let side_by_side = width >= 240.0;
         let (rect, _) = ui.allocate_exact_size(
             Vec2::new(width, if side_by_side { 54.0 } else { 108.0 }),
             Sense::hover(),
@@ -179,6 +219,12 @@ impl MonitorApp {
     fn top_apps_section(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
         let width = ui.available_width();
+        let rows = self.data.top_apps.len().min(5);
+        ui.add_space(Self::centred(if rows == 0 {
+            22.0 + 6.0 + 4.0 + 18.0
+        } else {
+            22.0 + 6.0 + 22.0 * rows as f32
+        }));
         let (head, _) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::hover());
         paint_text(
             ui.painter(),
@@ -251,12 +297,12 @@ Captured TCP/UDP app traffic in the selected period and adapters.",
     }
 }
 
-/// Legend entry that also shows the live speed and toggles its series.
+/// Legend entry that shows the live speed and the period's peak, and toggles its series.
 fn series_toggle(
     ui: &mut egui::Ui,
     id: &str,
     label: &str,
-    value: &str,
+    (value, peak): (&str, &str),
     color: Color32,
     on: &mut bool,
 ) {
@@ -271,7 +317,14 @@ fn series_toggle(
         p.dim,
     );
     let label_width = widgets::text_width(ui.painter(), label, sans(13.5)) + 16.0;
-    let size = Vec2::new(galley.size().x.max(label_width) + 4.0, 58.0);
+    let peak_width = widgets::text_width(ui.painter(), peak, bold(13.5)).max(widgets::text_width(
+        ui.painter(),
+        "Peak",
+        sans(12.0),
+    )) + 2.0;
+    let gap = 26.0;
+    let content = galley.size().x + gap + peak_width;
+    let size = Vec2::new(content.max(label_width) + 4.0, 58.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let response = ui.interact(rect, ui.make_persistent_id(id), Sense::click());
     response.widget_info(|| {
@@ -303,7 +356,7 @@ fn series_toggle(
         painter,
         Rect::from_min_size(
             rect.min + Vec2::new(0.0, 20.0),
-            Vec2::new(rect.width(), 38.0),
+            Vec2::new(galley.size().x + 2.0, 38.0),
         ),
         Align2::LEFT_CENTER,
         value,
@@ -311,5 +364,36 @@ fn series_toggle(
         p.text.gamma_multiply(fade),
         p.dim.gamma_multiply(fade),
     );
-    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // The peak sits beside the live number, centred on it, behind a faint rule.
+    let left = rect.left() + galley.size().x + gap;
+    painter.vline(
+        left - gap / 2.0,
+        rect.top() + 27.0..=rect.top() + 53.0,
+        widgets::px_stroke(ui.ctx(), 1.0, p.hairline.gamma_multiply(2.0)),
+    );
+    paint_text(
+        painter,
+        Rect::from_min_size(
+            Pos2::new(left, rect.top() + 24.0),
+            Vec2::new(peak_width, 15.0),
+        ),
+        Align2::LEFT_CENTER,
+        "Peak",
+        sans(12.0),
+        p.dim.gamma_multiply(fade),
+    );
+    paint_text(
+        painter,
+        Rect::from_min_size(
+            Pos2::new(left, rect.top() + 39.0),
+            Vec2::new(peak_width, 17.0),
+        ),
+        Align2::LEFT_CENTER,
+        peak,
+        bold(13.5),
+        p.text.gamma_multiply(fade),
+    );
+    response
+        .on_hover_text("Peak is the highest speed in the selected period. Click to show or hide this direction.")
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
 }

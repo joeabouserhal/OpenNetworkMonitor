@@ -615,7 +615,19 @@ fn summary_keeps_usage_separate_from_captured_destinations() {
             let (usage, destinations, apps) =
                 (at("Total usage"), at("LAN / WAN"), at("Top 5 apps"));
             assert!(usage.x < destinations.x && destinations.x < apps.x);
-            assert!((usage.y - destinations.y).abs() < 4.0 && (usage.y - apps.y).abs() < 4.0);
+            // Each section is centred in its cell, so shorter ones sit lower than the full list.
+            let totals_content = if width > 1000.0 { 84.0 } else { 138.0 };
+            let offset = |content| MonitorApp::centred(content);
+            assert!(
+                (usage.y - apps.y - offset(totals_content)).abs() < 3.0,
+                "Total usage sits {} below the apps heading",
+                usage.y - apps.y
+            );
+            assert!(
+                (destinations.y - apps.y - offset(crate::graph::DESTINATION_HEIGHT)).abs() < 3.0,
+                "LAN / WAN sits {} below the apps heading",
+                destinations.y - apps.y
+            );
             let (down, up) = (at("Downloaded"), at("Uploaded"));
             if width > 1000.0 {
                 assert!(down.y == up.y && down.x < up.x, "Wide totals share a row");
@@ -1243,4 +1255,106 @@ fn every_theme_colours_the_title_bar_like_the_app() {
         assert_eq!(colors.dark, palette.dark, "{theme:?}");
         assert_ne!(colors.border, colors.caption, "{theme:?} border is visible");
     }
+}
+fn history_with_samples() -> History {
+    // (timestamp, down, up, observed): the window is 1000..=1100.
+    let samples = [
+        (999, 9_000_000, 9_000_000, true), // before the period
+        (1000, 1_000_000, 100_000, true),
+        (1020, 4_000_000, 700_000, true),
+        (1040, 2_000_000, 300_000, true),
+        (1060, 50_000_000, 50_000_000, false), // a gap marker, not a measurement
+        (1100, 3_000_000, 200_000, true),
+        (1101, 8_000_000, 8_000_000, true), // after the period
+    ];
+    History {
+        window_start: 1000,
+        window_end: 1100,
+        points: samples
+            .into_iter()
+            .map(|(timestamp, down, up, observed)| Point {
+                timestamp,
+                down,
+                up,
+                observed,
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+#[test]
+fn peak_speeds_cover_the_selected_period_and_ignore_gaps() {
+    let mut app = fixture();
+    assert_eq!(
+        app.peak_rates(),
+        (None, None),
+        "An empty period has no peak"
+    );
+    app.data.history = Arc::new(history_with_samples());
+    assert_eq!(
+        app.peak_rates(),
+        (Some(4_000_000.0), Some(700_000.0)),
+        "Only observed samples inside the window count"
+    );
+    // A frozen chart keeps reporting the samples it froze.
+    app.frozen = Some(FrozenChart {
+        points: vec![Point {
+            timestamp: 1010,
+            down: 7,
+            up: 5,
+            observed: true,
+        }],
+        window: (1000, 1100),
+    });
+    assert_eq!(app.peak_rates(), (Some(7.0), Some(5.0)));
+}
+#[test]
+fn the_live_speeds_are_shown_with_the_peak_for_the_period() {
+    let ctx = context(Theme::Dark);
+    let mut app = fixture();
+    app.data.history = Arc::new(history_with_samples());
+    let size = Vec2::new(1200.0, 820.0);
+    let (mut out, bottom, limit) = app_frame(&mut app, &ctx, size, vec![]);
+    let labels = text_positions(&out);
+    out.textures_delta.clear();
+    let find = |text: &str| -> Vec<egui::Pos2> {
+        labels
+            .iter()
+            .filter(|(label, _)| label == text)
+            .map(|(_, pos)| *pos)
+            .collect()
+    };
+    let peaks = find("Peak");
+    assert_eq!(peaks.len(), 2, "One peak per direction");
+    let (download, upload) = (find("Download")[0], find("Upload")[0]);
+    assert!(
+        peaks[0].x > download.x && peaks[0].x < upload.x && peaks[1].x > upload.x,
+        "Each peak sits beside its own speed"
+    );
+    let down_peak = find(&app.rate(4_000_000.0));
+    let up_peak = find(&app.rate(700_000.0));
+    assert!(
+        down_peak.len() == 1 && up_peak.len() == 1,
+        "Peaks are formatted like the live speeds"
+    );
+    assert!(down_peak[0].x < up_peak[0].x);
+    assert!(bottom <= limit + 1.0);
+}
+#[test]
+fn the_destination_breakdown_fills_exactly_its_declared_height() {
+    let ctx = context(Theme::Dark);
+    let totals = ScopeTotals {
+        lan: 5,
+        wan: 7,
+        unknown: 3,
+    };
+    let mut height = 0.0;
+    let mut out = ctx.run_ui(screen(Vec2::new(400.0, 300.0), vec![]), |root| {
+        root.spacing_mut().item_spacing.y = 0.0;
+        let top = root.cursor().top();
+        crate::graph::destination_breakdown(root, &totals);
+        height = root.cursor().top() - top;
+    });
+    out.textures_delta.clear();
+    assert_eq!(height, crate::graph::DESTINATION_HEIGHT);
 }
