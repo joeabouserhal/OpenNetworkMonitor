@@ -2,8 +2,6 @@ use super::*;
 use eframe::egui::{Align, Align2, Layout, PopupCloseBehavior, Pos2, Rect, Sense};
 use widgets::{Col, Icon, bold, paint_text, paint_value, pal, sans, thin};
 
-const SIDE_WIDTH: f32 = 316.0;
-
 impl MonitorApp {
     pub(super) fn overview(&mut self, ui: &mut egui::Ui) {
         // These pages budget their height explicitly, so widgets must not add their own gaps.
@@ -14,13 +12,19 @@ impl MonitorApp {
             self.adapter_overview(ui);
         }
     }
+    /// Fixed height of the sections inside the summary card, so the chart can take the rest.
+    pub(super) const SUMMARY_CONTENT_HEIGHT: f32 = 138.0;
+    const SUMMARY_GAP: f32 = 12.0;
+
     pub(super) fn adapter_overview(&mut self, ui: &mut egui::Ui) {
         self.toolbar(ui, false);
-        widgets::columns(ui, [Col::Flex(1.0), Col::Fixed(SIDE_WIDTH)], 16.0, |cols| {
-            let [chart, side] = cols;
-            self.chart_card(chart);
-            self.summary_panel(side);
+        let summary = widgets::surface(ui).total_margin().sum().y + Self::SUMMARY_CONTENT_HEIGHT;
+        let chart_height = (ui.available_height() - summary - Self::SUMMARY_GAP).max(160.0);
+        ui.allocate_ui(Vec2::new(ui.available_width(), chart_height), |ui| {
+            self.chart_card(ui)
         });
+        ui.add_space(Self::SUMMARY_GAP);
+        self.summary_card(ui);
     }
 
     fn chart_card(&mut self, ui: &mut egui::Ui) {
@@ -82,163 +86,168 @@ impl MonitorApp {
         });
     }
 
-    /// Period totals and the busiest apps, as cards that keep their natural height.
-    pub(super) fn summary_panel(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        self.totals_card(ui);
-        ui.add_space(12.0);
-        self.top_apps_card(ui);
-    }
-
-    fn totals_card(&mut self, ui: &mut egui::Ui) {
-        let p = pal(ui);
+    /// Total usage, destinations and the busiest apps in one card below the chart.
+    pub(super) fn summary_card(&mut self, ui: &mut egui::Ui) {
         widgets::surface(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let width = ui.available_width();
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 60.0), Sense::hover());
-            let half = ((width - 16.0) / 2.0).floor();
-            for (i, label, value, color) in [
-                (0.0, "Downloaded", self.data.history.down, p.down),
-                (1.0, "Uploaded", self.data.history.up, p.up),
-            ] {
-                let cell = Rect::from_min_size(
-                    rect.min + Vec2::new(i * (half + 16.0), 0.0),
-                    Vec2::new(half, rect.height()),
-                );
-                ui.painter().circle_filled(
-                    Pos2::new(cell.left() + 4.0, cell.top() + 9.0),
-                    3.5,
-                    color,
-                );
-                paint_text(
-                    ui.painter(),
-                    Rect::from_min_size(
-                        cell.min + Vec2::new(14.0, 0.0),
-                        Vec2::new(half - 14.0, 18.0),
-                    ),
-                    Align2::LEFT_CENTER,
-                    label,
-                    sans(13.0),
-                    p.dim,
-                );
-                paint_value(
-                    ui.painter(),
-                    Rect::from_min_size(cell.min + Vec2::new(0.0, 22.0), Vec2::new(half, 38.0)),
-                    Align2::LEFT_CENTER,
-                    &compact_bytes(value),
-                    (thin(26.0), sans(14.0)),
-                    p.text,
-                    p.dim,
-                );
-            }
-            ui.add_space(16.0);
-            widgets::divider(ui);
-            ui.add_space(16.0);
-            crate::graph::destination_breakdown(ui, &self.data.classified);
+            let (rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), Self::SUMMARY_CONTENT_HEIGHT),
+                Sense::hover(),
+            );
+            let mut body = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            widgets::columns(
+                &mut body,
+                [Col::Flex(0.27), Col::Flex(0.33), Col::Flex(0.40)],
+                40.0,
+                |cols| {
+                    let [totals, destinations, apps] = cols;
+                    self.totals_section(totals);
+                    crate::graph::destination_breakdown(destinations, &self.data.classified);
+                    self.top_apps_section(apps);
+                    for (left, right) in [(&*totals, &*destinations), (&*destinations, &*apps)] {
+                        let x = (left.max_rect().right() + right.max_rect().left()) / 2.0;
+                        totals.painter().vline(
+                            x,
+                            rect.top()..=rect.bottom(),
+                            widgets::hairline(totals),
+                        );
+                    }
+                },
+            );
         });
     }
 
-    fn top_apps_card(&mut self, ui: &mut egui::Ui) {
+    fn totals_section(&self, ui: &mut egui::Ui) {
         let p = pal(ui);
-        widgets::surface(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let width = ui.available_width();
-            let (head, _) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::hover());
+        let width = ui.available_width();
+        let (head, _) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::hover());
+        paint_text(
+            ui.painter(),
+            head,
+            Align2::LEFT_CENTER,
+            "Total usage",
+            bold(14.5),
+            p.text,
+        );
+        ui.add_space(8.0);
+        // Narrow sections stack the two totals instead of squeezing them.
+        let side_by_side = width >= 240.0;
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(width, if side_by_side { 54.0 } else { 108.0 }),
+            Sense::hover(),
+        );
+        let half = ((width - 16.0) / 2.0).floor();
+        for (i, label, value, color) in [
+            (0.0, "Downloaded", self.data.history.down, p.down),
+            (1.0, "Uploaded", self.data.history.up, p.up),
+        ] {
+            let cell = if side_by_side {
+                Rect::from_min_size(
+                    rect.min + Vec2::new(i * (half + 16.0), 0.0),
+                    Vec2::new(half, 54.0),
+                )
+            } else {
+                Rect::from_min_size(rect.min + Vec2::new(0.0, i * 54.0), Vec2::new(width, 54.0))
+            };
+            ui.painter()
+                .circle_filled(Pos2::new(cell.left() + 4.0, cell.top() + 9.0), 3.5, color);
             paint_text(
                 ui.painter(),
-                head,
+                Rect::from_min_size(
+                    cell.min + Vec2::new(14.0, 0.0),
+                    Vec2::new(cell.width() - 14.0, 18.0),
+                ),
                 Align2::LEFT_CENTER,
-                "Top 5 apps",
-                bold(14.5),
+                label,
+                sans(13.0),
+                p.dim,
+            );
+            paint_value(
+                ui.painter(),
+                Rect::from_min_size(
+                    cell.min + Vec2::new(0.0, 20.0),
+                    Vec2::new(cell.width(), if side_by_side { 34.0 } else { 30.0 }),
+                ),
+                Align2::LEFT_CENTER,
+                &compact_bytes(value),
+                (thin(if side_by_side { 26.0 } else { 22.0 }), sans(14.0)),
+                p.text,
+                p.dim,
+            );
+        }
+    }
+
+    fn top_apps_section(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        let width = ui.available_width();
+        let (head, _) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::hover());
+        paint_text(
+            ui.painter(),
+            head,
+            Align2::LEFT_CENTER,
+            "Top 5 apps",
+            bold(14.5),
+            p.text,
+        );
+        paint_text(
+            ui.painter(),
+            head,
+            Align2::RIGHT_CENTER,
+            "Total",
+            sans(12.5),
+            p.dim,
+        );
+        ui.add_space(6.0);
+        for app in self.data.top_apps.iter().take(5) {
+            let name = self.label(&app.app);
+            let (row, _) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::hover());
+            let icon = self.icons.texture(ui.ctx(), &app.app);
+            let painter = ui.painter();
+            let tile = Rect::from_center_size(
+                Pos2::new(row.left() + 9.0, row.center().y),
+                Vec2::splat(18.0),
+            );
+            apps::app_tile(painter, tile, &name, icon, &p);
+            let total = compact_bytes(app.down.saturating_add(app.up));
+            let total_width = widgets::text_width(painter, &total, bold(13.5)) + 2.0;
+            paint_text(
+                painter,
+                Rect::from_min_max(
+                    Pos2::new(row.left() + 28.0, row.top()),
+                    Pos2::new(row.right() - total_width - 8.0, row.bottom()),
+                ),
+                Align2::LEFT_CENTER,
+                &name,
+                sans(13.5),
                 p.text,
             );
             paint_text(
-                ui.painter(),
-                head,
+                painter,
+                Rect::from_min_max(Pos2::new(row.right() - total_width, row.top()), row.max),
                 Align2::RIGHT_CENTER,
-                "Total",
-                sans(12.5),
-                p.dim,
+                &total,
+                bold(13.5),
+                p.text,
             );
-            ui.add_space(8.0);
-            let busiest = self
-                .data
-                .top_apps
-                .first()
-                .map_or(0, |a| a.down.saturating_add(a.up));
-            for app in self.data.top_apps.iter().take(5) {
-                let name = self.label(&app.app);
-                let (row, _) = ui.allocate_exact_size(Vec2::new(width, 50.0), Sense::hover());
-                let icon = self.icons.texture(ui.ctx(), &app.app);
-                let painter = ui.painter();
-                let tile =
-                    Rect::from_min_size(Pos2::new(row.left(), row.top() + 7.0), Vec2::splat(30.0));
-                apps::app_tile(painter, tile, &name, icon, &p);
-                let total_bytes = app.down.saturating_add(app.up);
-                let total = compact_bytes(total_bytes);
-                let total_width = widgets::text_width(painter, &total, bold(14.0)) + 2.0;
-                let text_left = row.left() + 42.0;
-                paint_text(
-                    painter,
-                    Rect::from_min_max(
-                        Pos2::new(text_left, row.top() + 6.0),
-                        Pos2::new(row.right() - total_width - 8.0, row.top() + 26.0),
-                    ),
-                    Align2::LEFT_CENTER,
-                    &name,
-                    sans(14.0),
-                    p.text,
-                );
-                paint_text(
-                    painter,
-                    Rect::from_min_max(
-                        Pos2::new(row.right() - total_width, row.top() + 6.0),
-                        Pos2::new(row.right(), row.top() + 26.0),
-                    ),
-                    Align2::RIGHT_CENTER,
-                    &total,
-                    bold(14.0),
-                    p.text,
-                );
-                let track = Rect::from_min_max(
-                    Pos2::new(text_left, row.top() + 33.0),
-                    Pos2::new(row.right(), row.top() + 37.0),
-                );
-                painter.rect_filled(track, widgets::radius(2.0), p.text.gamma_multiply(0.07));
-                if busiest > 0 && total_bytes > 0 {
-                    let share = (total_bytes as f64 / busiest as f64) as f32;
-                    let down_part = (app.down as f64 / total_bytes as f64) as f32;
-                    widgets::split_bar(
-                        painter,
-                        Rect::from_min_size(
-                            track.min,
-                            Vec2::new((track.width() * share).max(4.0), track.height()),
-                        ),
-                        &[(down_part, p.down), (1.0 - down_part, p.up)],
-                        Color32::TRANSPARENT,
-                    );
-                }
-                ui.interact(
-                    row,
-                    ui.make_persistent_id(("summary-app", &app.app)),
-                    Sense::hover(),
-                )
-                .on_hover_text(format!(
-                    "{name}
+            ui.interact(
+                row,
+                ui.make_persistent_id(("summary-app", &app.app)),
+                Sense::hover(),
+            )
+            .on_hover_text(format!(
+                "{name}
 {}
 Downloaded: {}
 Uploaded: {}
 Captured TCP/UDP app traffic in the selected period and adapters.",
-                    app.app,
-                    format_bytes(app.down as f64),
-                    format_bytes(app.up as f64)
-                ));
-            }
-            if self.data.top_apps.is_empty() {
-                ui.add_space(4.0);
-                ui.label(RichText::new("No app traffic recorded").size(13.5).weak());
-            }
-        });
+                app.app,
+                format_bytes(app.down as f64),
+                format_bytes(app.up as f64)
+            ));
+        }
+        if self.data.top_apps.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("No app traffic recorded").size(13.5).weak());
+        }
     }
 }
 
@@ -277,7 +286,7 @@ fn series_toggle(
     if *on {
         painter.circle_filled(dot, 4.0, color);
     } else {
-        painter.circle_stroke(dot, 3.5, egui::Stroke::new(1.5, color));
+        painter.circle_stroke(dot, 3.5, widgets::snapped(ui.ctx(), 1.5, color));
     }
     paint_text(
         painter,

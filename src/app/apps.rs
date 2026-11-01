@@ -1,7 +1,6 @@
 use super::*;
 use eframe::egui::{
-    Align, Align2, Layout, Margin, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind,
-    TextureId,
+    Align, Align2, Layout, Margin, Painter, Pos2, Rect, Response, Sense, StrokeKind, TextureId,
 };
 use widgets::{Col, Icon, Palette, badge, bold, paint_icon, paint_text, pal, radius, sans};
 
@@ -384,7 +383,7 @@ fn usage_row(
         painter.rect_stroke(
             body,
             radius(11.0),
-            Stroke::new(1.5, p.accent),
+            widgets::focus_ring(ui),
             StrokeKind::Inside,
         );
     }

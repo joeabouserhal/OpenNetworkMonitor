@@ -2,7 +2,7 @@ use crate::{
     model::{Point, ScopeTotals, format_bytes, format_compact_bytes},
     widgets::{self, bold, paint_text, pal, sans},
 };
-use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Vec2};
 
 pub fn download_color(ui: &egui::Ui) -> Color32 {
     pal(ui).down
@@ -53,18 +53,22 @@ impl Graph {
         };
         let y = |v: u64| plot.bottom() - (transform(v as f64) / scaled) as f32 * plot.height();
         let painter = ui.painter();
+        let px = 1.0 / ui.ctx().pixels_per_point();
         for i in 0..5 {
             let f = i as f32 / 4.0;
-            let yy = (plot.bottom() - plot.height() * f).round();
+            let yy = plot.bottom() - plot.height() * f;
             let line = [Pos2::new(plot.left(), yy), Pos2::new(plot.right(), yy)];
             if i == 0 {
-                painter.line_segment(line, Stroke::new(1.0, p.hairline.gamma_multiply(2.0)));
+                painter.line_segment(
+                    line,
+                    widgets::px_stroke(ui.ctx(), 1.0, p.hairline.gamma_multiply(2.0)),
+                );
             } else {
                 painter.extend(egui::Shape::dashed_line(
                     &line,
-                    Stroke::new(1.0, p.hairline),
-                    3.0,
-                    5.0,
+                    widgets::px_stroke(ui.ctx(), 1.0, p.hairline),
+                    3.0 * px,
+                    5.0 * px,
                 ));
             }
             let value = if log {
@@ -157,7 +161,10 @@ impl Graph {
                         fill.add_triangle(n, n + 2, n + 3);
                     }
                     lines.add(egui::Shape::mesh(fill));
-                    lines.add(egui::Shape::line(line, Stroke::new(2.0, color)));
+                    lines.add(egui::Shape::line(
+                        line,
+                        widgets::px_stroke(ui.ctx(), 2.0, color),
+                    ));
                 }
                 if let Some(last) = samples.last() {
                     lines.circle_filled(*last, 5.0, p.card);
@@ -187,7 +194,7 @@ impl Graph {
                 let xx = x(point.timestamp);
                 lines.line_segment(
                     [Pos2::new(xx, plot.top()), Pos2::new(xx, plot.bottom())],
-                    Stroke::new(1.0, p.dim.gamma_multiply(0.55)),
+                    widgets::px_stroke(ui.ctx(), 1.0, p.dim.gamma_multiply(0.55)),
                 );
                 for (enabled, value, color) in [(down, point.down, p.down), (up, point.up, p.up)] {
                     if enabled {
@@ -389,7 +396,7 @@ pub fn destination_breakdown(ui: &mut egui::Ui, totals: &ScopeTotals) {
             ),
             Align2::LEFT_CENTER,
             &format_compact_bytes(value),
-            bold(15.0),
+            bold(if count == 3 { 13.5 } else { 15.0 }),
             p.text,
         );
     }

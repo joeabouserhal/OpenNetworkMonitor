@@ -400,14 +400,14 @@ mod render_tests {
                 "overview",
                 false,
                 wide,
-                vec![Step::ClickAt(1205.0, 169.0)],
+                vec![Step::ClickAt(1537.0, 169.0)],
             ),
             (
                 "hover-chart",
                 "overview",
                 false,
                 wide,
-                vec![Step::Hover(1178.0, 444.0)],
+                vec![Step::Hover(1478.0, 478.0)],
             ),
             (
                 "calendar",

@@ -6,6 +6,7 @@ const SETTINGS_WIDTH: f32 = 820.0;
 
 impl MonitorApp {
     pub(super) fn draw(&mut self, root: &mut egui::Ui) -> egui::Rect {
+        widgets::Palette::sync_scale(root.ctx());
         let p = pal(root);
         let rail = root.available_width() < widgets::NAV_RAIL_BELOW;
         egui::Panel::left("navigation")

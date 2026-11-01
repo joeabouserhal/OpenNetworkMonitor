@@ -239,14 +239,16 @@ impl CustomPeriod {
     fn fields(&mut self, ui: &mut egui::Ui) {
         if self.mode == PeriodMode::Rolling {
             field_header(ui, "AMOUNT");
+            // Frame width = text + 24pt margin + two outlines; keep the dialog width exact.
+            let inner = MODAL_WIDTH - 24.0 - 2.0 * widgets::hairline(ui).width;
             input_frame(ui).show(ui, |ui| {
-                ui.set_width(MODAL_WIDTH - 26.0);
+                ui.set_width(inner);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.amount)
                         .font(widgets::mono(14.0))
                         .hint_text("e.g. 30")
                         .char_limit(10)
-                        .desired_width(MODAL_WIDTH - 26.0)
+                        .desired_width(inner)
                         .frame(egui::Frame::NONE),
                 );
             });
@@ -293,7 +295,7 @@ fn input_frame(ui: &egui::Ui) -> egui::Frame {
     let p = widgets::pal(ui);
     egui::Frame::new()
         .fill(p.sunken)
-        .stroke(egui::Stroke::new(1.0, p.hairline))
+        .stroke(widgets::hairline(ui))
         .corner_radius(10)
         .inner_margin(egui::Margin::symmetric(12, 8))
 }
@@ -321,10 +323,11 @@ fn date_time_row(ui: &mut egui::Ui, label: &str, fields: &mut DateTimeFields) ->
         ui.horizontal(|ui| {
             ui.set_min_height(40.0);
             row_label(ui, label);
-            let width = 286.0;
+            // 44pt label, 24pt of margins and two outlines per frame, 82pt time field, 20pt spacing.
+            let inner = MODAL_WIDTH - 194.0 - 4.0 * widgets::hairline(ui).width;
             let calendar = input_frame(ui)
                 .show(ui, |ui| {
-                    ui.set_width(width - 24.0);
+                    ui.set_width(inner);
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.horizontal(|ui| {
                         ui.add(
@@ -332,7 +335,7 @@ fn date_time_row(ui: &mut egui::Ui, label: &str, fields: &mut DateTimeFields) ->
                                 .font(widgets::mono(14.0))
                                 .hint_text("YYYY-MM-DD")
                                 .char_limit(10)
-                                .desired_width(width - 52.0)
+                                .desired_width(inner - 28.0)
                                 .frame(egui::Frame::NONE),
                         );
                         calendar_button(ui)
@@ -372,7 +375,8 @@ fn calendar_button(ui: &mut egui::Ui) -> egui::Response {
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Choose date")
     });
-    let stroke = egui::Stroke::new(
+    let stroke = widgets::snapped(
+        ui.ctx(),
         1.4,
         if response.hovered() || response.has_focus() {
             p.accent
@@ -406,7 +410,7 @@ fn day_cell(ui: &mut egui::Ui, label: &str, selected: bool, today: bool) -> egui
         painter.rect_stroke(
             body,
             widgets::radius(8.0),
-            egui::Stroke::new(1.0, p.accent.gamma_multiply(0.7)),
+            widgets::px_stroke(ui.ctx(), 1.0, p.accent.gamma_multiply(0.7)),
             egui::StrokeKind::Inside,
         );
     }

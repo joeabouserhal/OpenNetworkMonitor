@@ -1,5 +1,5 @@
 use super::*;
-use eframe::egui::{Align, Align2, Layout, Margin, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
+use eframe::egui::{Align, Align2, Layout, Margin, Pos2, Rect, Sense, Shape, StrokeKind};
 use widgets::{
     ButtonKind, bold, divider, paint_text, pal, radius, sans, setting_row, strong_text, thin,
 };
@@ -48,7 +48,7 @@ fn theme_picker(ui: &mut egui::Ui, current: &mut Theme) -> bool {
             painter.rect_stroke(
                 card,
                 radius(7.0),
-                Stroke::new(1.0, swatch.hairline),
+                widgets::px_stroke(ui.ctx(), 1.0, swatch.hairline),
                 StrokeKind::Inside,
             );
             painter.circle_filled(card.left_top() + Vec2::new(9.0, 9.0), 3.0, swatch.accent);
@@ -71,15 +71,15 @@ fn theme_picker(ui: &mut egui::Ui, current: &mut Theme) -> bool {
                     .enumerate()
                     .map(|(i, h)| Pos2::new(card.left() + 8.0 + i as f32 * step, base - h))
                     .collect();
-                painter.add(Shape::line(points, Stroke::new(1.6, color)));
+                painter.add(Shape::line(points, widgets::snapped(ui.ctx(), 1.6, color)));
             }
             painter.rect_stroke(
                 preview,
                 radius(11.0),
                 if on {
-                    Stroke::new(2.0, p.accent)
+                    widgets::px_stroke(ui.ctx(), 2.0, p.accent)
                 } else {
-                    Stroke::new(1.0, p.hairline.gamma_multiply(2.0))
+                    widgets::px_stroke(ui.ctx(), 1.0, p.hairline.gamma_multiply(2.0))
                 },
                 StrokeKind::Inside,
             );

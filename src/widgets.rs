@@ -45,12 +45,30 @@ pub struct Palette {
 }
 
 const PALETTE_ID: &str = "onm-palette";
+const PIXELS_ID: &str = "onm-pixels";
 
 impl Palette {
     /// Stores the tokens and restyles egui's own widgets to match.
     pub fn install(self, ctx: &egui::Context) {
         ctx.data_mut(|d| d.insert_temp(Id::new(PALETTE_ID), self));
         install_fonts(ctx);
+        self.restyle(ctx);
+    }
+    /// egui's own outlines (popups, tooltips, focus) are sized in points, so they
+    /// are rebuilt whenever the pixel density changes, e.g. when the interface
+    /// size is adjusted or the window moves to another display.
+    pub fn sync_scale(ctx: &egui::Context) {
+        let current = ctx.pixels_per_point();
+        let known = ctx.data(|d| d.get_temp::<f32>(Id::new(PIXELS_ID)));
+        if known.is_some_and(|known| (known - current).abs() > 1e-4) {
+            Self::of(ctx).restyle(ctx);
+            ctx.request_repaint();
+        }
+    }
+    fn restyle(self, ctx: &egui::Context) {
+        let ppp = ctx.pixels_per_point();
+        ctx.data_mut(|d| d.insert_temp(Id::new(PIXELS_ID), ppp));
+        let px = 1.0 / ppp;
         let mut v = if self.dark {
             egui::Visuals::dark()
         } else {
@@ -64,7 +82,7 @@ impl Palette {
         v.extreme_bg_color = self.sunken;
         v.code_bg_color = self.sunken;
         v.text_edit_bg_color = Some(self.sunken);
-        v.window_stroke = Stroke::new(1.0, self.hairline);
+        v.window_stroke = Stroke::new(px, self.hairline);
         v.window_corner_radius = CornerRadius::same(CARD_RADIUS);
         v.menu_corner_radius = CornerRadius::same(12);
         let shadow = egui::Shadow {
@@ -76,21 +94,21 @@ impl Palette {
         v.window_shadow = shadow;
         v.popup_shadow = shadow;
         v.selection.bg_fill = self.card.lerp_to_gamma(self.accent, 0.38);
-        v.selection.stroke = Stroke::new(1.0, self.accent);
+        v.selection.stroke = Stroke::new(px, self.accent);
         v.hyperlink_color = self.accent;
         v.error_fg_color = self.bad;
         v.warn_fg_color = self.warn;
-        v.text_cursor.stroke = Stroke::new(1.5, self.accent);
+        v.text_cursor.stroke = Stroke::new(2.0 * px, self.accent);
         v.striped = false;
         v.slider_trailing_fill = true;
         v.indent_has_left_vline = false;
         v.collapsing_header_frame = false;
         let hover = self.raised.lerp_to_gamma(self.text, 0.07);
-        let ink = Stroke::new(1.0, self.text);
+        let ink = Stroke::new(px, self.text);
         let widgets = &mut v.widgets;
         widgets.noninteractive.bg_fill = self.card;
         widgets.noninteractive.weak_bg_fill = self.card;
-        widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.hairline);
+        widgets.noninteractive.bg_stroke = Stroke::new(px, self.hairline);
         widgets.noninteractive.fg_stroke = ink;
         for (state, fill) in [
             (&mut widgets.inactive, self.raised),
@@ -105,9 +123,9 @@ impl Palette {
             state.expansion = 0.0;
         }
         widgets.inactive.bg_stroke = Stroke::NONE;
-        widgets.hovered.bg_stroke = Stroke::new(1.0, self.hairline);
-        widgets.active.bg_stroke = Stroke::new(1.0, self.accent);
-        widgets.open.bg_stroke = Stroke::new(1.0, self.accent);
+        widgets.hovered.bg_stroke = Stroke::new(px, self.hairline);
+        widgets.active.bg_stroke = Stroke::new(px, self.accent);
+        widgets.open.bg_stroke = Stroke::new(px, self.accent);
         ctx.set_visuals(v);
         ctx.global_style_mut(|s| {
             s.spacing.item_spacing = Vec2::new(10.0, 8.0);
@@ -152,6 +170,29 @@ impl Palette {
 
 pub fn pal(ui: &Ui) -> Palette {
     Palette::of(ui.ctx())
+}
+
+/// A stroke exactly `pixels` physical pixels wide. Whole pixels keep rules and
+/// outlines crisp: egui snaps rectangle edges to the pixel grid but not stroke
+/// widths, so a width of 1 point is soft and uneven at most interface scales.
+pub fn px_stroke(ctx: &egui::Context, pixels: f32, color: Color32) -> Stroke {
+    Stroke::new(pixels / ctx.pixels_per_point(), color)
+}
+
+/// `points` rounded to a whole number of physical pixels, at least one.
+pub fn snapped(ctx: &egui::Context, points: f32, color: Color32) -> Stroke {
+    let ppp = ctx.pixels_per_point();
+    Stroke::new((points * ppp).round().max(1.0) / ppp, color)
+}
+
+/// The standard one-pixel outline.
+pub fn hairline(ui: &Ui) -> Stroke {
+    px_stroke(ui.ctx(), 1.0, pal(ui).hairline)
+}
+
+/// The two-pixel ring drawn around keyboard-focused controls.
+pub fn focus_ring(ui: &Ui) -> Stroke {
+    px_stroke(ui.ctx(), 2.0, pal(ui).accent)
 }
 
 // ---------------------------------------------------------------- typography
@@ -326,7 +367,7 @@ pub enum Icon {
 /// interface and take any colour.
 pub fn paint_icon(painter: &Painter, icon: Icon, center: Pos2, size: f32, color: Color32) {
     let k = size / 24.0;
-    let stroke = Stroke::new((1.7 * k).max(1.2), color);
+    let stroke = snapped(painter.ctx(), (1.7 * k).max(1.2), color);
     let pt = |x: f32, y: f32| center + Vec2::new(x, y) * k;
     match icon {
         Icon::Overview => {
@@ -413,7 +454,7 @@ pub fn surface(ui: &Ui) -> egui::Frame {
     let p = pal(ui);
     egui::Frame::new()
         .fill(p.card)
-        .stroke(Stroke::new(1.0, p.hairline))
+        .stroke(hairline(ui))
         .corner_radius(CARD_RADIUS)
         .inner_margin(18)
 }
@@ -433,13 +474,9 @@ pub fn surface_fill<R>(
 }
 
 pub fn divider(ui: &mut Ui) {
-    let p = pal(ui);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().hline(
-        rect.x_range(),
-        rect.center().y,
-        Stroke::new(1.0, p.hairline),
-    );
+    ui.painter()
+        .hline(rect.x_range(), rect.center().y, hairline(ui));
 }
 
 pub fn empty_state(ui: &mut Ui, text: &str) {
@@ -477,7 +514,7 @@ pub fn message(ui: &mut Ui, text: &str, warning: bool, dismissible: bool) -> boo
     let mut dismissed = false;
     egui::Frame::new()
         .fill(p.card.lerp_to_gamma(tone, if p.dark { 0.13 } else { 0.10 }))
-        .stroke(Stroke::new(1.0, tone.gamma_multiply(0.35)))
+        .stroke(px_stroke(ui.ctx(), 1.0, tone.gamma_multiply(0.35)))
         .corner_radius(12)
         .inner_margin(Margin::symmetric(14, 10))
         .show(ui, |ui| {
@@ -541,7 +578,7 @@ pub fn button_with(
         ButtonKind::Secondary => (
             p.raised.lerp_to_gamma(p.text, 0.07 * hover),
             p.text,
-            Stroke::new(1.0, p.hairline),
+            hairline(ui),
         ),
         ButtonKind::Ghost => (p.raised.gamma_multiply(hover), p.text, Stroke::NONE),
     };
@@ -552,12 +589,7 @@ pub fn button_with(
         painter.rect_stroke(rect, radius(10.0), edge, StrokeKind::Inside);
     }
     if response.has_focus() {
-        painter.rect_stroke(
-            rect,
-            radius(10.0),
-            Stroke::new(1.5, p.accent),
-            StrokeKind::Outside,
-        );
+        painter.rect_stroke(rect, radius(10.0), focus_ring(ui), StrokeKind::Outside);
     }
     let inner = rect.shrink2(Vec2::new(14.0, 0.0));
     let content = label_width + icon_space;
@@ -636,12 +668,7 @@ pub fn segmented<T: Copy + PartialEq>(
     };
     let painter = ui.painter();
     painter.rect_filled(rect, radius(12.0), track);
-    painter.rect_stroke(
-        rect,
-        radius(12.0),
-        Stroke::new(1.0, p.hairline),
-        StrokeKind::Inside,
-    );
+    painter.rect_stroke(rect, radius(12.0), hairline(ui), StrokeKind::Inside);
     let selected = options.iter().position(|(v, _)| v == value).unwrap_or(0);
     let slide = ui
         .ctx()
@@ -652,17 +679,12 @@ pub fn segmented<T: Copy + PartialEq>(
     );
     painter.rect_filled(pill_rect, radius(9.0), pill);
     if p.dark {
-        painter.rect_stroke(
-            pill_rect,
-            radius(9.0),
-            Stroke::new(1.0, p.hairline),
-            StrokeKind::Inside,
-        );
+        painter.rect_stroke(pill_rect, radius(9.0), hairline(ui), StrokeKind::Inside);
     } else {
         painter.rect_stroke(
             pill_rect,
             radius(9.0),
-            Stroke::new(1.0, Color32::from_black_alpha(18)),
+            px_stroke(ui.ctx(), 1.0, Color32::from_black_alpha(18)),
             StrokeKind::Inside,
         );
     }
@@ -694,12 +716,8 @@ pub fn segmented<T: Copy + PartialEq>(
             ink,
         );
         if response.has_focus() {
-            ui.painter().rect_stroke(
-                cell,
-                radius(9.0),
-                Stroke::new(1.5, p.accent),
-                StrokeKind::Inside,
-            );
+            ui.painter()
+                .rect_stroke(cell, radius(9.0), focus_ring(ui), StrokeKind::Inside);
         }
         if response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -738,7 +756,8 @@ pub fn chip(ui: &mut Ui, id: &str, label: &str, value: &str) -> Response {
     painter.rect_stroke(
         rect,
         radius(17.0),
-        Stroke::new(
+        px_stroke(
+            ui.ctx(),
             1.0,
             if open || response.has_focus() {
                 p.accent
@@ -827,12 +846,8 @@ fn menu_hover(ui: &Ui, rect: Rect, response: &Response, selected: bool) {
         );
     }
     if response.has_focus() {
-        ui.painter().rect_stroke(
-            rect,
-            radius(8.0),
-            Stroke::new(1.5, p.accent),
-            StrokeKind::Inside,
-        );
+        ui.painter()
+            .rect_stroke(rect, radius(8.0), focus_ring(ui), StrokeKind::Inside);
     }
 }
 
@@ -894,7 +909,7 @@ pub fn check_item(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
         painter.rect_stroke(
             boxed,
             radius(5.0),
-            Stroke::new(1.5, p.dim.gamma_multiply(0.8)),
+            px_stroke(ui.ctx(), 1.0, p.dim.gamma_multiply(0.8)),
             StrokeKind::Inside,
         );
     }
@@ -985,12 +1000,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         .gamma_multiply(fade),
     );
     if response.has_focus() {
-        painter.rect_stroke(
-            rect,
-            radius(12.0),
-            Stroke::new(1.5, p.accent),
-            StrokeKind::Outside,
-        );
+        painter.rect_stroke(rect, radius(12.0), focus_ring(ui), StrokeKind::Outside);
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1046,7 +1056,7 @@ pub fn slider(
         },
     );
     if response.has_focus() || response.dragged() {
-        painter.circle_stroke(knob, 11.5, Stroke::new(1.5, p.accent));
+        painter.circle_stroke(knob, 11.5, focus_ring(ui));
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1109,7 +1119,8 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> R
             Shape::rect_stroke(
                 rect,
                 radius(17.0),
-                Stroke::new(
+                px_stroke(
+                    ui.ctx(),
                     1.0,
                     if response.has_focus() {
                         p.accent
@@ -1191,12 +1202,7 @@ pub fn navigation(ui: &mut Ui, title: &str, icon: Icon, selected: bool, rail: bo
         p.raised.gamma_multiply(chosen.max(hover * 0.55)),
     );
     if response.has_focus() {
-        painter.rect_stroke(
-            rect,
-            radius(11.0),
-            Stroke::new(1.5, p.accent),
-            StrokeKind::Inside,
-        );
+        painter.rect_stroke(rect, radius(11.0), focus_ring(ui), StrokeKind::Inside);
     }
     let ink = p.dim.lerp_to_gamma(p.text, chosen.max(hover));
     let icon_ink = p

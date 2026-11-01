@@ -1,5 +1,5 @@
 use super::*;
-use eframe::egui::{Align2, PopupCloseBehavior, Rect, Sense, Stroke, StrokeKind};
+use eframe::egui::{Align2, PopupCloseBehavior, Rect, Sense, StrokeKind};
 use widgets::{bold, check_item, menu_heading, menu_item, paint_text, pal, radius};
 
 impl MonitorApp {
@@ -272,7 +272,7 @@ fn period_cell(ui: &mut egui::Ui, selected: bool, label: &str, tip: &str) -> egu
         painter.rect_stroke(
             rect,
             radius(8.0),
-            Stroke::new(1.5, p.accent),
+            widgets::focus_ring(ui),
             StrokeKind::Inside,
         );
     }

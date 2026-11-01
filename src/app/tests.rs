@@ -550,72 +550,105 @@ fn saved_theme_names_still_load_after_the_redesign() {
 }
 #[test]
 fn summary_keeps_usage_separate_from_captured_destinations() {
-    for unknown in [0, 500_000_000] {
-        let ctx = context(Theme::Dark);
-        let mut app = fixture();
-        app.data.history = Arc::new(History {
-            down: 7_945_689_497,
-            up: 262_878_003,
-            ..Default::default()
-        });
-        app.data.classified = ScopeTotals {
-            lan: 41851,
-            wan: 619_635_835,
-            unknown,
-        };
-        app.data.top_apps = (0..6)
-            .map(|i| AppUsage {
-                app: format!("app{i}.exe"),
-                down: 1000 - i * 100,
-                up: 10,
-            })
-            .collect();
-        let mut summary = egui::Rect::NOTHING;
-        let mut out = ctx.run_ui(screen(Vec2::new(420.0, 620.0), vec![]), |root| {
-            summary = root
-                .allocate_ui(Vec2::new(316.0, 560.0), |ui| app.summary_panel(ui))
-                .response
-                .rect;
-        });
-        let labels = text_positions(&out);
-        out.textures_delta.clear();
-        assert!(
-            summary.height() <= 561.0 && summary.right() <= 317.0,
-            "Summary grew to {summary:?}"
-        );
-        for required in [
-            "Downloaded",
-            "Uploaded",
-            "7.4 GiB",
-            "250.7 MiB",
-            "LAN / WAN",
-            "LAN",
-            "WAN",
-            "Top 5 apps",
-            "app0.exe",
-            "app4.exe",
-        ] {
+    for width in [1200.0, 720.0] {
+        for unknown in [0, 500_000_000] {
+            let ctx = context(Theme::Dark);
+            let mut app = fixture();
+            app.data.history = Arc::new(History {
+                down: 7_945_689_497,
+                up: 262_878_003,
+                ..Default::default()
+            });
+            app.data.classified = ScopeTotals {
+                lan: 41851,
+                wan: 619_635_835,
+                unknown,
+            };
+            app.data.top_apps = (0..6)
+                .map(|i| AppUsage {
+                    app: format!("app{i}.exe"),
+                    down: 1000 - i * 100,
+                    up: 10,
+                })
+                .collect();
+            let mut summary = egui::Rect::NOTHING;
+            let mut out = ctx.run_ui(screen(Vec2::new(width + 20.0, 260.0), vec![]), |root| {
+                root.spacing_mut().item_spacing.y = 0.0;
+                summary = root
+                    .allocate_ui(Vec2::new(width, 220.0), |ui| app.summary_card(ui))
+                    .response
+                    .rect;
+            });
+            let labels = text_positions(&out);
+            out.textures_delta.clear();
             assert!(
-                labels.iter().any(|(text, _)| text == required),
-                "Missing {required}"
+                summary.height() <= MonitorApp::SUMMARY_CONTENT_HEIGHT + 40.0
+                    && summary.right() <= width + 1.0,
+                "Summary grew to {summary:?}"
             );
+            for required in [
+                "Total usage",
+                "Downloaded",
+                "Uploaded",
+                "7.4 GiB",
+                "250.7 MiB",
+                "LAN / WAN",
+                "LAN",
+                "WAN",
+                "Top 5 apps",
+                "app0.exe",
+                "app4.exe",
+            ] {
+                assert!(
+                    labels.iter().any(|(text, _)| text == required),
+                    "Missing {required} at width {width}"
+                );
+            }
+            assert!(
+                labels.iter().any(|(text, _)| text.ends_with(" captured")),
+                "App-byte total needs its own label"
+            );
+            assert_eq!(labels.iter().any(|(text, _)| text == "Other"), unknown > 0);
+            assert!(!labels.iter().any(|(text, _)| text == "app5.exe"));
+            let at = |needle: &str| labels.iter().find(|(text, _)| text == needle).unwrap().1;
+            let (usage, destinations, apps) =
+                (at("Total usage"), at("LAN / WAN"), at("Top 5 apps"));
+            assert!(usage.x < destinations.x && destinations.x < apps.x);
+            assert!((usage.y - destinations.y).abs() < 4.0 && (usage.y - apps.y).abs() < 4.0);
+            let (down, up) = (at("Downloaded"), at("Uploaded"));
+            if width > 1000.0 {
+                assert!(down.y == up.y && down.x < up.x, "Wide totals share a row");
+            } else {
+                assert!(down.x == up.x && down.y < up.y, "Narrow totals stack");
+            }
         }
-        assert!(
-            labels.iter().any(|(text, _)| text.ends_with(" captured")),
-            "App-byte total needs its own label"
-        );
-        assert_eq!(labels.iter().any(|(text, _)| text == "Other"), unknown > 0);
-        assert!(!labels.iter().any(|(text, _)| text == "app5.exe"));
-        assert!(
-            !labels
-                .iter()
-                .any(|(text, _)| text == "Usage" || text.starts_with("last "))
-        );
-        let at = |needle: &str| labels.iter().find(|(text, _)| text == needle).unwrap().1;
-        assert!(at("Downloaded").y == at("Uploaded").y && at("Downloaded").x < at("Uploaded").x);
-        assert!(at("LAN / WAN").y > at("Downloaded").y);
-        assert!(at("Top 5 apps").y > at("LAN / WAN").y);
     }
+}
+#[test]
+fn the_chart_sits_above_the_summary_and_fills_the_remaining_height() {
+    let ctx = context(Theme::Dark);
+    let size = Vec2::new(1200.0, 820.0);
+    let mut app = fixture();
+    app.data.top_apps = vec![AppUsage {
+        app: "app0.exe".into(),
+        down: 1000,
+        up: 10,
+    }];
+    let (mut out, bottom, limit) = app_frame(&mut app, &ctx, size, vec![]);
+    let labels = text_positions(&out);
+    out.textures_delta.clear();
+    let at = |needle: &str| labels.iter().find(|(text, _)| text == needle).unwrap().1;
+    // The legend heads the chart; the summary headings come after the whole plot.
+    assert!(at("Download").y < at("Total usage").y);
+    assert!(
+        at("0 B/s").y < at("Total usage").y,
+        "Axis labels end above the summary"
+    );
+    assert!(
+        at("Total usage").y > size.y * 0.6,
+        "The summary is the bottom row"
+    );
+    assert!(bottom <= limit + 1.0);
 }
 #[test]
 fn every_page_stays_within_the_window_at_supported_interface_sizes() {
@@ -1112,5 +1145,88 @@ fn chart_legend_toggles_hide_each_direction() {
         } else {
             assert!(!app.show_down && !app.show_up);
         }
+    }
+}
+#[test]
+fn every_outline_is_a_whole_number_of_physical_pixels() {
+    fn widths(shape: &egui::Shape, into: &mut Vec<f32>) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| widths(s, into)),
+            egui::Shape::Rect(rect) => into.push(rect.stroke.width),
+            egui::Shape::LineSegment { stroke, .. } => into.push(stroke.width),
+            egui::Shape::Circle(circle) => into.push(circle.stroke.width),
+            egui::Shape::Path(path) => into.push(path.stroke.width),
+            _ => {}
+        }
+    }
+    // Common display scalings combined with the 80-110% interface size.
+    let input = |size: Vec2, native: f32, ppp: f32| {
+        let mut input = screen(size / ppp, vec![]);
+        input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                native_pixels_per_point: Some(native),
+                ..Default::default()
+            },
+        );
+        input
+    };
+    for (native, zoom) in [(1.0, 0.9), (1.25, 0.9), (1.5, 1.0), (1.0, 1.1), (2.0, 0.8)] {
+        let ppp = native * zoom;
+        for (page, source) in [
+            (Page::Overview, Source::Adapter),
+            (Page::Overview, Source::Transport),
+            (Page::Connections, Source::Transport),
+            (Page::Adapters, Source::Adapter),
+            (Page::Settings, Source::Adapter),
+        ] {
+            let ctx = context(Theme::Dark);
+            ctx.set_zoom_factor(zoom);
+            let mut app = app_fixture();
+            app.page = page;
+            app.settings.filter.source = source;
+            app.data.snapshot.adapters = (0..3)
+                .map(|i| Adapter {
+                    id: i.to_string(),
+                    name: format!("Ethernet {i}"),
+                    up: true,
+                    ..Default::default()
+                })
+                .collect();
+            let mut found = Vec::new();
+            // The first frames apply the zoom and rebuild egui's own outlines for it.
+            for _ in 0..3 {
+                let mut out = ctx.run_ui(input(Vec2::new(1200.0, 820.0), native, ppp), |root| {
+                    app.draw(root);
+                });
+                assert!((out.pixels_per_point - ppp).abs() < 1e-3);
+                found.clear();
+                out.shapes.iter().for_each(|s| widths(&s.shape, &mut found));
+                out.textures_delta.clear();
+            }
+            assert!(found.len() > 5, "{} drew no outlines", page.label());
+            for width in found.iter().copied().filter(|w| *w > 0.0) {
+                let pixels = width * ppp;
+                assert!(
+                    pixels >= 0.99 && (pixels - pixels.round()).abs() < 0.02,
+                    "{} has a {pixels:.3}px outline at {ppp}x",
+                    page.label()
+                );
+            }
+        }
+        let ctx = context(Theme::Dark);
+        ctx.set_zoom_factor(zoom);
+        for _ in 0..3 {
+            ctx.run_ui(input(Vec2::new(400.0, 300.0), native, ppp), |root| {
+                widgets::Palette::sync_scale(root.ctx());
+            })
+            .textures_delta
+            .clear();
+        }
+        let popup_outline = ctx.global_style().visuals.window_stroke.width * ppp;
+        assert!(
+            (popup_outline - 1.0).abs() < 0.02,
+            "Popup outline is {popup_outline:.3}px at {ppp}x"
+        );
     }
 }
