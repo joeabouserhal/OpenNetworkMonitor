@@ -530,10 +530,10 @@ pub fn message(ui: &mut Ui, text: &str, warning: bool, dismissible: bool) -> boo
                 let (dot, _) = ui.allocate_exact_size(Vec2::new(8.0, 20.0), Sense::hover());
                 ui.painter().circle_filled(dot.center(), 4.0, tone);
                 let width = (ui.available_width() - if dismissible { 84.0 } else { 0.0 }).max(50.0);
-                ui.add_sized(
-                    [width, 0.0],
-                    egui::Label::new(RichText::new(text).size(14.0)).wrap(),
-                );
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    ui.add(egui::Label::new(RichText::new(text).size(14.0)).wrap());
+                });
                 if dismissible {
                     dismissed = button(ui, ButtonKind::Ghost, "Dismiss").clicked();
                 }

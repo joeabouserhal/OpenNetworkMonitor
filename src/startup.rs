@@ -228,7 +228,8 @@ fn set_enabled(enabled: bool, exe: &Path) -> Result<()> {
         }
         if let Some(risk) = location::risk(exe) {
             bail!(
-                "Start at sign-in needs this app in a protected folder such as Program Files: {risk}."
+                "Start at sign-in needs this app in a protected folder such as Program Files. {}",
+                risk.replace('\n', " ")
             );
         }
         let xml = task_xml(sid, exe)?;

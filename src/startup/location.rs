@@ -92,7 +92,7 @@ fn describe(sid: &str) -> &str {
         "S-1-1-0" => "Everyone",
         "S-1-5-11" => "Authenticated Users",
         "S-1-5-32-545" => "Users",
-        other => other,
+        _ => "a non-administrator account",
     }
 }
 
@@ -101,19 +101,20 @@ fn describe(sid: &str) -> &str {
 pub fn risk_with(exe: &Path, access: impl Fn(&Path) -> Option<Access>) -> Option<String> {
     let parent = exe.parent()?;
     let mut checks: Vec<(PathBuf, u32, &str)> = vec![
-        (exe.to_path_buf(), CHANGE_CONTENT, "the app file"),
-        (parent.to_path_buf(), CHANGE_CONTENT, "its folder"),
+        (exe.to_path_buf(), CHANGE_CONTENT, "The app file"),
+        (parent.to_path_buf(), CHANGE_CONTENT, "The app's folder"),
     ];
-    checks.extend(
-        parent
-            .ancestors()
-            .skip(1)
-            .map(|folder| (folder.to_path_buf(), REPLACE_FOLDER, "a folder above it")),
-    );
+    checks.extend(parent.ancestors().skip(1).map(|folder| {
+        (
+            folder.to_path_buf(),
+            REPLACE_FOLDER,
+            "A folder above the app",
+        )
+    }));
     for (path, rights, what) in checks {
         let Some(access) = access(&path) else {
             return Some(format!(
-                "Its permissions could not be read ({})",
+                "Its permissions could not be read.\n{}",
                 path.display()
             ));
         };
@@ -121,9 +122,9 @@ pub fn risk_with(exe: &Path, access: impl Fn(&Path) -> Option<Access>) -> Option
         if !writers.is_empty() {
             let names: Vec<&str> = writers.iter().map(|sid| describe(sid)).collect();
             return Some(format!(
-                "{what} ({}) can be changed by {}",
-                path.display(),
-                names.join(", ")
+                "{what} can be changed by {}.\n{}",
+                names.join(", "),
+                path.display()
             ));
         }
     }

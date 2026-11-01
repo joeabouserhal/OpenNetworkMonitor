@@ -257,7 +257,7 @@ impl MonitorApp {
                 } else {
                     "Startup runs with administrator rights, so the app has to live in a protected folder such as Program Files."
                 };
-                widgets::message(ui, &format!("{advice} {risk}."), true, false);
+                widgets::message(ui, &format!("{advice}\n{risk}"), true, false);
                 ui.add_space(10.0);
             }
             if self.startup.enabled && self.startup.different_copy {
