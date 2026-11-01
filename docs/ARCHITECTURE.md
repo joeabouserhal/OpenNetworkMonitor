@@ -5,6 +5,7 @@ The desktop executable has a single collector thread and an egui/eframe UI threa
 - `model.rs`: shared records, filter matching, counter reset handling, scope classification, adapter attribution, formatting.
 - `capture/identity.rs`: cached, local executable version-resource display names keyed by stable full paths.
 - `capture/windows.rs`: IP Helper adapter counters/addresses, IPv4/IPv6 owner-PID socket tables, process identity and single-instance handle.
+- `window_state.rs`: recognises and repairs a collapsed saved window (see Window state below).
 - `titlebar.rs`: colours the native Windows title bar from the active palette through DWM.
 - `capture/instance.rs`: single-instance lock and hand-over from an older running build (see below).
 - `capture/etw.rs`: uniquely named, app-owned ETW session; TCP and UDP providers; bounded nonblocking queue; decode/drop/kernel-loss counters. Capture never stops another program's trace session.
@@ -140,3 +141,7 @@ Opening a build while another copy runs normally shows "already running". If the
 ## Title bar
 
 The window keeps the system's own title bar, so edge resizing, snap layouts, animations and accessibility stay native; titlebar.rs only sets its colours through `DwmSetWindowAttribute`. The caption takes the palette's canvas colour so the bar reads as part of the window, the title text takes the text colour, the border is a faint tint of the text colour, and the immersive-dark-mode flag switches the minimise/maximise/close glyphs between light and dark. The colours are applied in `MonitorApp::new`, before the window is first shown, and again whenever the theme changes. Windows 11 (build 22000 and later) honours all of them; older versions ignore the colours and keep their standard bar. DWM does not allow the caption, text or border colours to be read back, so the tests assert the palette mapping, that every attribute is accepted on a real window, and the readable dark-mode flag; the colour itself was confirmed by capturing the preview window's own image.
+
+## Window state
+
+eframe saves the window's size and position at exit. A minimized Windows window reports a 0x0 client area at (-32000, -32000), so exiting while minimized, which the build hand-over makes easy to do, saved exactly that. The next launch clamped it to egui's 64-point floor (ignoring the 960x680 minimum) and saved the 64-point size again, so every start was a tiny window until it was resized by hand. window_state.rs treats a record with a side under 200 points or a position beyond -10000 pixels as collapsed. `main` repairs such a record in `preferences.ron` before eframe reads it, replacing it with a record that has no size or position so the window opens at its default size, which also cleans up files written by older builds. `MonitorApp::save` runs after eframe stores the geometry and puts back the last real record when the fresh one is collapsed, so a minimized exit keeps the user's size and position. Both are tested, including against the exact records Windows produced.

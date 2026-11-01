@@ -52,6 +52,7 @@ impl MonitorApp {
             breakdown_cache_key: None,
             host_request: None,
             titlebar: None,
+            window_record: None,
         };
         if page == "apps" {
             app.settings.filter.source = Source::Transport;

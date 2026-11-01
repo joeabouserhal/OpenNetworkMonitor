@@ -53,6 +53,7 @@ fn fixture() -> MonitorApp {
         breakdown_cache_key: None,
         host_request: None,
         titlebar: None,
+        window_record: None,
     }
 }
 fn app_fixture() -> MonitorApp {
@@ -1400,5 +1401,51 @@ fn the_peak_is_quieter_than_the_live_speed() {
     assert!(
         peak_size <= 13.0 && label_size < peak_size && live_size >= 24.0,
         "The peak stays small next to the {live_size}pt live speed"
+    );
+}
+#[derive(Default)]
+struct MemoryStorage(std::collections::HashMap<String, String>);
+impl eframe::Storage for MemoryStorage {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_owned(), value);
+    }
+    fn remove_string(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+    fn flush(&mut self) {}
+}
+#[test]
+fn a_minimized_window_never_overwrites_the_last_real_size_and_position() {
+    use eframe::{App as _, Storage as _};
+    let real = "(inner_position_pixels:Some((x:294.0,y:317.0)),outer_position_pixels:Some((x:286.0,y:286.0)),fullscreen:false,maximized:false,inner_size_points:Some((x:1600.0,y:911.0)))";
+    let collapsed = "(inner_position_pixels:Some((x:-32000.0,y:-32000.0)),outer_position_pixels:Some((x:-32000.0,y:-32000.0)),fullscreen:false,maximized:false,inner_size_points:Some((x:0.0,y:0.0)))";
+    let mut app = fixture();
+    let mut storage = MemoryStorage::default();
+    // eframe stores the window's geometry first, then asks the app to save.
+    storage.set_string("window", real.to_owned());
+    app.save(&mut storage);
+    assert_eq!(app.window_record.as_deref(), Some(real));
+    assert_eq!(storage.get_string("window").as_deref(), Some(real));
+    storage.set_string("window", collapsed.to_owned());
+    app.save(&mut storage);
+    assert_eq!(
+        storage.get_string("window").as_deref(),
+        Some(real),
+        "The collapsed record is replaced by the last real one"
+    );
+    // With nothing real remembered, the app opens at its default size instead.
+    let mut fresh = fixture();
+    storage.set_string("window", collapsed.to_owned());
+    fresh.save(&mut storage);
+    assert_eq!(
+        storage.get_string("window").as_deref(),
+        Some(crate::window_state::DEFAULT_RECORD)
+    );
+    assert!(
+        storage.get_string("settings").is_some(),
+        "Settings still save"
     );
 }

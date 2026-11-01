@@ -10,6 +10,7 @@ pub mod store;
 pub mod titlebar;
 pub mod traffic;
 pub mod tray;
+pub mod window_state;
 pub mod worker;
 
 pub mod widgets;

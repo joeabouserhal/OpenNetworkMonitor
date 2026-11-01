@@ -127,6 +127,8 @@ pub struct MonitorApp {
     host_request: Option<Instant>,
     /// Theme the title bar was last coloured for.
     titlebar: Option<Theme>,
+    /// The last window record eframe saved that described a real window.
+    window_record: Option<String>,
 }
 impl MonitorApp {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, data_dir: PathBuf) -> Result<Self> {
@@ -139,6 +141,10 @@ impl MonitorApp {
         settings.filter.scope = Scope::All;
         install_fonts(&cc.egui_ctx);
         settings.theme.apply(&cc.egui_ctx);
+        let window_record = cc
+            .storage
+            .and_then(|storage| storage.get_string(WINDOW_KEY))
+            .filter(|record| crate::window_state::is_sane(record));
         // Done before the window is first shown so the title bar never flashes its default colour.
         let titlebar = crate::titlebar::apply(
             cc,
@@ -201,6 +207,7 @@ impl MonitorApp {
             breakdown_cache_key: None,
             host_request: None,
             titlebar,
+            window_record,
         })
     }
     fn update_filter(&mut self) {
@@ -372,6 +379,28 @@ impl MonitorApp {
     }
 }
 
+/// Key under which eframe stores the window's size and position.
+const WINDOW_KEY: &str = "window";
+
+impl MonitorApp {
+    /// eframe has just stored the window's geometry. A minimized window reports a
+    /// collapsed one, which must not replace the last real size and position.
+    fn keep_window_record(&mut self, storage: &mut dyn eframe::Storage) {
+        let Some(record) = storage.get_string(WINDOW_KEY) else {
+            return;
+        };
+        if crate::window_state::is_sane(&record) {
+            self.window_record = Some(record);
+        } else {
+            let kept = self
+                .window_record
+                .clone()
+                .unwrap_or_else(|| crate::window_state::DEFAULT_RECORD.to_owned());
+            storage.set_string(WINDOW_KEY, kept);
+        }
+    }
+}
+
 impl eframe::App for MonitorApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.settings.wide_summary_initialized {
@@ -429,6 +458,7 @@ impl eframe::App for MonitorApp {
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "settings", &self.settings);
+        self.keep_window_record(storage);
     }
 }
 

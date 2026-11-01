@@ -3,7 +3,7 @@
 compile_error!("OpenNetworkMonitor currently supports Windows only.");
 
 use anyhow::{Context, Result};
-use open_network_monitor::{app, capture, model, store, tray, widgets};
+use open_network_monitor::{app, capture, model, store, tray, widgets, window_state};
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
@@ -56,6 +56,8 @@ fn run() -> Result<()> {
         capture::InstanceGuard::acquire_or_replace(&data_dir)?
     };
     instance.publish(&data_dir);
+    // A copy that exited while minimized saved a collapsed window; repair it before eframe reads it.
+    window_state::repair_file(&data_dir.join("preferences.ron"));
     let store = store::Store::open(&data_dir.join("usage.db"))?;
     let icon = eframe::egui::IconData {
         rgba: tray::icon_pixels(),
