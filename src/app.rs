@@ -125,6 +125,8 @@ pub struct MonitorApp {
     breakdown_cache: Arc<Breakdown>,
     breakdown_cache_key: Option<(u64, u64, u64, String, Option<String>)>,
     host_request: Option<Instant>,
+    /// Theme the title bar was last coloured for.
+    titlebar: Option<Theme>,
 }
 impl MonitorApp {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, data_dir: PathBuf) -> Result<Self> {
@@ -137,6 +139,12 @@ impl MonitorApp {
         settings.filter.scope = Scope::All;
         install_fonts(&cc.egui_ctx);
         settings.theme.apply(&cc.egui_ctx);
+        // Done before the window is first shown so the title bar never flashes its default colour.
+        let titlebar = crate::titlebar::apply(
+            cc,
+            crate::titlebar::Colors::from_palette(&settings.theme.palette()),
+        )
+        .then_some(settings.theme);
         settings.ui_scale = valid_ui_scale(settings.ui_scale);
         cc.egui_ctx.set_zoom_factor(settings.ui_scale);
         let worker = Worker::start(
@@ -192,6 +200,7 @@ impl MonitorApp {
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
             host_request: None,
+            titlebar,
         })
     }
     fn update_filter(&mut self) {
@@ -403,7 +412,14 @@ impl eframe::App for MonitorApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
     }
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.titlebar != Some(self.settings.theme) {
+            crate::titlebar::apply(
+                &*frame,
+                crate::titlebar::Colors::from_palette(&self.settings.theme.palette()),
+            );
+            self.titlebar = Some(self.settings.theme);
+        }
         self.draw(root);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

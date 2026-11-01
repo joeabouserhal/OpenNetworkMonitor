@@ -51,6 +51,7 @@ impl MonitorApp {
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
             host_request: None,
+            titlebar: None,
         };
         if page == "apps" {
             app.settings.filter.source = Source::Transport;

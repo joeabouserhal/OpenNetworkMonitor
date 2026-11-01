@@ -52,6 +52,7 @@ fn fixture() -> MonitorApp {
         breakdown_cache: Arc::default(),
         breakdown_cache_key: None,
         host_request: None,
+        titlebar: None,
     }
 }
 fn app_fixture() -> MonitorApp {
@@ -1228,5 +1229,18 @@ fn every_outline_is_a_whole_number_of_physical_pixels() {
             (popup_outline - 1.0).abs() < 0.02,
             "Popup outline is {popup_outline:.3}px at {ppp}x"
         );
+    }
+}
+#[test]
+fn every_theme_colours_the_title_bar_like_the_app() {
+    for theme in Theme::ALL {
+        let palette = theme.palette();
+        let colors = crate::titlebar::Colors::from_palette(&palette);
+        let colorref =
+            |c: Color32| u32::from(c.r()) | u32::from(c.g()) << 8 | u32::from(c.b()) << 16;
+        assert_eq!(colors.caption, colorref(palette.canvas), "{theme:?}");
+        assert_eq!(colors.text, colorref(palette.text), "{theme:?}");
+        assert_eq!(colors.dark, palette.dark, "{theme:?}");
+        assert_ne!(colors.border, colors.caption, "{theme:?} border is visible");
     }
 }

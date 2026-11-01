@@ -2563,6 +2563,7 @@ dependencies = [
  "ferrisetw",
  "ico",
  "maxminddb",
+ "raw-window-handle",
  "rfd",
  "rusqlite",
  "serde",

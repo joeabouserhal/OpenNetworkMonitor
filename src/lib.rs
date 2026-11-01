@@ -7,6 +7,7 @@ pub mod icons;
 pub mod model;
 pub mod startup;
 pub mod store;
+pub mod titlebar;
 pub mod traffic;
 pub mod tray;
 pub mod worker;

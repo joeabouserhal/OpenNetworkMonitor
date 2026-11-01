@@ -28,11 +28,13 @@ fn main() -> eframe::Result {
         "OpenNetworkMonitor UI preview",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(Preview(MonitorApp::preview(
-                &cc.egui_ctx,
-                &page,
-                light,
-            ))))
+            let app = MonitorApp::preview(&cc.egui_ctx, &page, light);
+            let palette = widgets::Palette::of(&cc.egui_ctx);
+            open_network_monitor::titlebar::apply(
+                cc,
+                open_network_monitor::titlebar::Colors::from_palette(&palette),
+            );
+            Ok(Box::new(Preview(app)))
         }),
     )
 }
