@@ -9,7 +9,7 @@ use std::{
 };
 use tray_icon::{
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 use windows_sys::Win32::{
     Foundation::HWND,
@@ -17,8 +17,13 @@ use windows_sys::Win32::{
 };
 
 pub struct Tray {
-    pub _icon: TrayIcon,
+    icon: TrayIcon,
     pub exit: Arc<AtomicBool>,
+    /// Whether the user has paused recording from the menu.
+    pub paused: Arc<AtomicBool>,
+    /// Set by the menu; the window takes it, goes to Settings and clears it.
+    pub open_settings: Arc<AtomicBool>,
+    last_tooltip: std::cell::RefCell<String>,
 }
 pub fn icon_pixels() -> Vec<u8> {
     crate::app_icon::pixels(32)
@@ -28,19 +33,36 @@ impl Tray {
     pub fn new(ctx: egui::Context) -> anyhow::Result<Self> {
         let menu = Menu::new();
         let show = MenuItem::new("Open OpenNetworkMonitor", true, None);
+        let settings = MenuItem::new("Open Settings", true, None);
+        let pause = CheckMenuItem::new("Pause recording", true, false, None);
         let exit_item = MenuItem::new("Exit", true, None);
         menu.append(&show)?;
+        menu.append(&settings)?;
+        menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&pause)?;
+        menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&exit_item)?;
         let exit = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let open_settings = Arc::new(AtomicBool::new(false));
         let flag = exit.clone();
+        let (paused_flag, settings_flag) = (paused.clone(), open_settings.clone());
         let wake = ctx.clone();
         let show_id = show.id().clone();
+        let settings_id = settings.id().clone();
+        let pause_id = pause.id().clone();
         let exit_id = exit_item.id().clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if event.id == exit_id {
                 request_exit(&wake, &flag);
             } else if event.id == show_id {
                 show_window(&wake, &flag);
+            } else if event.id == settings_id {
+                settings_flag.store(true, Ordering::Release);
+                show_window(&wake, &flag);
+            } else if event.id == pause_id {
+                // The item ticks itself when clicked; this follows it.
+                paused_flag.fetch_xor(true, Ordering::AcqRel);
             }
             wake.request_repaint();
         }));
@@ -64,7 +86,21 @@ impl Tray {
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()?;
-        Ok(Self { _icon: tray, exit })
+        Ok(Self {
+            icon: tray,
+            exit,
+            paused,
+            open_settings,
+            last_tooltip: std::cell::RefCell::new(String::new()),
+        })
+    }
+    /// Shows `text` when the pointer rests on the tray icon. Unchanged text is not
+    /// sent to Windows again.
+    pub fn set_tooltip(&self, text: &str) {
+        if *self.last_tooltip.borrow() != text {
+            let _ = self.icon.set_tooltip(Some(text));
+            *self.last_tooltip.borrow_mut() = text.to_owned();
+        }
     }
 }
 /// The main window, for the wake-ups below. Zero until `remember_window` is called.

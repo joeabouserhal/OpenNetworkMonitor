@@ -49,6 +49,8 @@ pub enum Command {
     ResolveHosts(Vec<String>),
     /// Display names the history reader worked out for the apps it loaded.
     Labels(HashMap<String, String>),
+    /// Stop saving what is captured, or start again.
+    Pause(bool),
     /// The app whose timeline the window is showing, and how far back, or none.
     FocusApp(Option<(String, SeriesView)>),
     Alerts(AlertConfig),
@@ -154,7 +156,7 @@ fn effective_filter(filter: &Filter, known: &HashSet<String>) -> Filter {
             result.adapters.intersection(known).cloned().collect()
         };
         if result.adapters.is_empty() {
-            result.adapters.insert("__none__".into());
+            result.adapters.insert(NO_ADAPTERS.into());
         }
     }
     result
@@ -569,6 +571,7 @@ fn run(
     let mut previous_wifi = HashMap::<String, String>::new();
     let mut previous = HashMap::<String, (u64, u64)>::new();
     let mut focus: Option<(String, SeriesView)> = None;
+    let mut recording_paused = false;
     let mut alerts = AlertConfig::default();
     let mut tracker = Tracker::new(store.folder().as_deref());
     tracker.know(store.known_apps().unwrap_or_default());
@@ -686,6 +689,7 @@ fn run(
                 }
                 Command::ResolveHosts(addresses) => hosts.request(&addresses),
                 Command::Labels(found) => labels.extend(found),
+                Command::Pause(paused) => recording_paused = paused,
                 Command::Alerts(config) => {
                     alerts = config;
                     last_cap_check = Instant::now() - Duration::from_secs(3600);
@@ -720,6 +724,7 @@ fn run(
             let mut snapshot = Snapshot {
                 interval,
                 captured_at: now,
+                recording_paused,
                 ..Default::default()
             };
             let all_adapters = match capture::all_adapters() {
@@ -856,7 +861,7 @@ fn run(
                     .collect(),
             };
             // Once recording has given up nothing drains this list, so stop growing it.
-            if !storage_failed {
+            if !storage_failed && !recording_paused {
                 pending_samples.push(live_tick);
             }
             let mut event_rows = BTreeMap::<
@@ -891,7 +896,7 @@ fn run(
                                 event,
                                 adapter_id: adapter
                                     .map(|a| a.id.clone())
-                                    .unwrap_or_else(|| "unassigned".into()),
+                                    .unwrap_or_else(|| UNASSIGNED_ADAPTER.into()),
                                 adapter: adapter
                                     .map(|a| a.name.clone())
                                     .unwrap_or_else(|| "Unassigned".into()),
@@ -961,7 +966,7 @@ fn run(
                 row.down = row.down.saturating_add(event.down);
                 row.up = row.up.saturating_add(event.up);
             }
-            if !stop {
+            if !stop && !recording_paused {
                 for row in event_rows.values() {
                     // A name Windows could not give is not worth an alert.
                     if row.app.starts_with("Process ") {
@@ -1000,7 +1005,7 @@ fn run(
                     state.cap = None;
                 }
             }
-            if !storage_failed {
+            if !storage_failed && !recording_paused {
                 pending
                     .entry(now / 60 * 60)
                     .or_default()

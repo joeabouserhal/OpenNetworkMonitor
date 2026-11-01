@@ -299,6 +299,13 @@ impl MonitorApp {
                                 Vec2::new(ui.available_width(), CONNECTION_ROW_HEIGHT),
                                 Sense::click(),
                             );
+                            response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    describe(name, c),
+                                )
+                            });
                             let cells = connection_columns(rect);
                             let painter = ui.painter();
                             if response.hovered() {

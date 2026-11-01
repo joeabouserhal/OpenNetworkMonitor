@@ -305,9 +305,12 @@ impl MonitorApp {
                 "Built-in Windows capture. Administrator access is requested on launch.",
                 300.0,
                 |ui| {
-                    if widgets::button(ui, ButtonKind::Secondary, "Retry capture").clicked() {
-                        let _ = self.worker.tx.send(Command::RetryCapture);
-                    }
+                    // Nothing to retry while detailed capture is already running.
+                    ui.add_enabled_ui(!active, |ui| {
+                        if widgets::button(ui, ButtonKind::Secondary, "Retry capture").clicked() {
+                            let _ = self.worker.tx.send(Command::RetryCapture);
+                        }
+                    });
                     widgets::badge(
                         ui,
                         if active {
@@ -515,9 +518,13 @@ impl MonitorApp {
         ui.add_space(18.0);
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             ui.label(
-                RichText::new("OpenNetworkMonitor 0.3.4 · MIT · Rust + egui")
-                    .size(13.0)
-                    .weak(),
+                RichText::new(concat!(
+                    "OpenNetworkMonitor ",
+                    env!("CARGO_PKG_VERSION"),
+                    " · MIT · Rust + egui"
+                ))
+                .size(13.0)
+                .weak(),
             );
         });
         ui.add_space(24.0);

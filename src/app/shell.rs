@@ -3,6 +3,13 @@ use eframe::egui::{Align, Layout, Margin, Pos2, Rect, Sense, UiBuilder};
 use widgets::{Icon, pal, radius, strong_text};
 
 const SETTINGS_WIDTH: f32 = 820.0;
+/// How long an information message stays before it goes away on its own.
+const NOTICE_LIFETIME: Duration = Duration::from_secs(15);
+
+/// Messages that report damage are kept until the user dismisses them.
+fn notice_is_sticky(text: &str) -> bool {
+    text.contains("integrity check")
+}
 
 impl MonitorApp {
     pub(super) fn draw(&mut self, root: &mut egui::Ui) -> egui::Rect {
@@ -45,6 +52,9 @@ impl MonitorApp {
                 ui.scope_builder(UiBuilder::new().max_rect(page), |ui| {
                     self.page_header(ui);
                     self.banners(ui);
+                    if self.page == Page::Overview && self.settings.intro_seen == Some(false) {
+                        self.intro_card(ui);
+                    }
                     match self.page {
                         Page::Overview => self.overview(ui),
                         Page::Connections => self.connections(ui),
@@ -104,13 +114,15 @@ impl MonitorApp {
                 .clicked()
             {
                 self.page = page;
-                self.selected_app = None;
             }
             ui.add_space(4.0);
         }
         let active = self.data.snapshot.etw_active;
-        let tone = if active { p.good } else { p.warn };
-        let status = if active {
+        let paused = self.data.snapshot.recording_paused;
+        let tone = if active && !paused { p.good } else { p.warn };
+        let status = if paused {
+            "Recording paused"
+        } else if active {
             "Monitoring active"
         } else {
             "Capture unavailable"
@@ -203,20 +215,86 @@ impl MonitorApp {
         }
     }
 
+    /// A short welcome for a first launch, shown until it is dismissed.
+    fn intro_card(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        let mut dismissed = false;
+        let mut open_settings = false;
+        widgets::surface(ui)
+            .fill(p.accent_soft)
+            .inner_margin(Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(strong_text("Welcome to OpenNetworkMonitor", 16.0));
+                for line in [
+                    "Overall Traffic is everything each network adapter carries. App traffic shows which apps and hosts used it, and needs administrator rights.",
+                    "Right-click a connection for actions, and use Ctrl+1 to Ctrl+4 to switch pages.",
+                    "Settings has data-cap and new-app alerts, and an optional country database for IP lookups.",
+                ] {
+                    ui.label(RichText::new(line).size(13.5).color(p.dim));
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    dismissed = widgets::button(ui, widgets::ButtonKind::Primary, "Got it").clicked();
+                    open_settings =
+                        widgets::button(ui, widgets::ButtonKind::Secondary, "Open Settings")
+                            .clicked();
+                });
+            });
+        ui.add_space(10.0);
+        if dismissed || open_settings {
+            self.settings.intro_seen = Some(true);
+        }
+        if open_settings {
+            self.page = Page::Settings;
+        }
+    }
+
+    /// Whether the message on screen has been there long enough to go away by itself.
+    /// A new message starts its own time; one about damaged history stays until dismissed.
+    fn notice_expired(&mut self, ctx: &egui::Context) -> bool {
+        let text = &self.data.notice;
+        let shown = match &self.notice_seen {
+            Some((seen, at)) if seen == text => *at,
+            _ => {
+                let now = Instant::now();
+                self.notice_seen = Some((text.clone(), now));
+                now
+            }
+        };
+        if notice_is_sticky(text) {
+            return false;
+        }
+        let age = shown.elapsed();
+        if age >= NOTICE_LIFETIME {
+            return true;
+        }
+        ctx.request_repaint_after(NOTICE_LIFETIME - age);
+        false
+    }
+    /// Removes the message from the window and from the worker, but only if the worker
+    /// still holds this same message; a newer one may have arrived since it was drawn.
+    fn clear_notice(&mut self) {
+        let dismissed = std::mem::take(&mut self.data.notice);
+        if let Ok(mut state) = self.worker.shared.lock()
+            && state.notice == dismissed
+        {
+            state.notice.clear();
+        }
+        self.notice_seen = None;
+    }
+
     /// Status messages stacked under the header; capture warnings stay visible on every page.
     fn banners(&mut self, ui: &mut egui::Ui) {
         if !self.view_warning.is_empty() {
             widgets::message(ui, &self.view_warning, true, false);
         }
-        if !self.data.notice.is_empty() && widgets::message(ui, &self.data.notice, false, true) {
-            // Only clear the worker's copy if it is still the message that was dismissed;
-            // a newer one may have arrived since it was drawn.
-            let dismissed = std::mem::take(&mut self.data.notice);
-            if let Ok(mut state) = self.worker.shared.lock()
-                && state.notice == dismissed
-            {
-                state.notice.clear();
-            }
+        if !self.data.notice.is_empty()
+            && (widgets::message(ui, &self.data.notice, false, true)
+                | self.notice_expired(ui.ctx()))
+        {
+            self.clear_notice();
         }
         for warning in &self.data.snapshot.warnings {
             widgets::message(ui, warning, true, false);
@@ -236,5 +314,19 @@ impl MonitorApp {
                 false,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    #[test]
+    fn only_damage_reports_outlive_the_timeout() {
+        assert!(notice_is_sticky(
+            "Saved history failed its integrity check. Preserve usage.db"
+        ));
+        assert!(!notice_is_sticky("Exported 12 rows to C:/a.csv"));
+        assert!(!notice_is_sticky("Data cap reached: you have used 100 GiB"));
     }
 }

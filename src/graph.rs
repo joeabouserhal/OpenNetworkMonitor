@@ -4,13 +4,6 @@ use crate::{
 };
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Vec2};
 
-pub fn download_color(ui: &egui::Ui) -> Color32 {
-    pal(ui).down
-}
-pub fn upload_color(ui: &egui::Ui) -> Color32 {
-    pal(ui).up
-}
-
 #[derive(Default)]
 pub struct Graph;
 impl Graph {
@@ -30,6 +23,13 @@ impl Graph {
         let width = ui.available_width().max(1.0);
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(width, height.max(90.0)), Sense::hover());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Label,
+                true,
+                "Chart of download and upload speed over the selected period. Hover for the value at a point.",
+            )
+        });
         if width < 150.0 {
             return;
         }
@@ -449,7 +449,7 @@ fn nice_maximum(value: u64) -> f64 {
         .find(|v| *v >= target)
         .unwrap_or(target)
 }
-fn speed_label(bytes: f64, bits: bool) -> String {
+pub fn speed_label(bytes: f64, bits: bool) -> String {
     if bits {
         format!("{}bit/s", format_number(bytes * 8.0))
     } else {

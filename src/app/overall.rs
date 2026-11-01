@@ -213,6 +213,11 @@ impl MonitorApp {
                 p.text,
                 p.dim,
             );
+            widgets::describe(
+                ui,
+                cell,
+                &format!("{label}: {}", format_bytes(value as f64)),
+            );
         }
     }
 
@@ -274,12 +279,15 @@ impl MonitorApp {
                 bold(13.5),
                 p.text,
             );
-            ui.interact(
+            let summary = ui.interact(
                 row,
                 ui.make_persistent_id(("summary-app", &app.app)),
                 Sense::hover(),
-            )
-            .on_hover_text(format!(
+            );
+            summary.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("{name}: {total}"))
+            });
+            summary.on_hover_text(format!(
                 "{name}
 {}
 Downloaded: {}
@@ -337,7 +345,12 @@ fn series_toggle(
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let response = ui.interact(rect, ui.make_persistent_id(id), Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, label)
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Checkbox,
+            ui.is_enabled(),
+            *on,
+            format!("{label}, now {value}, peak {peak}"),
+        )
     });
     if response.clicked() {
         *on = !*on;

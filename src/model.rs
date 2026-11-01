@@ -236,6 +236,14 @@ pub struct TransportSummary {
     pub classified: ScopeTotals,
     pub top_apps: Vec<AppUsage>,
 }
+/// Stored in a saved selection to mean "no adapter": an empty selection means all of them.
+/// The text is kept in saved preferences, so it must not change.
+pub const NO_ADAPTERS: &str = "__none__";
+/// Likewise "no app", for an app filter that matches nothing.
+pub const NO_APPS: &str = "__none__";
+/// The adapter id given to traffic that cannot be tied to one adapter.
+pub const UNASSIGNED_ADAPTER: &str = "unassigned";
+
 /// How far back an app's timeline looks. Daily and monthly views have a span of their
 /// own, so they stay useful when the selected period is only minutes long.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -295,6 +303,8 @@ pub struct ScopeTotals {
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub captured_at: i64,
+    /// Recording is paused from the tray: capture goes on but nothing is saved.
+    pub recording_paused: bool,
     pub app_labels: HashMap<String, String>,
     pub host_labels: HashMap<String, String>,
     pub adapters: Vec<Adapter>,

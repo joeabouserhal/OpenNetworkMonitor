@@ -858,6 +858,19 @@ fn menu_hover(ui: &Ui, rect: Rect, response: &Response, selected: bool) {
     }
 }
 
+/// Gives text that is painted straight onto the canvas a node for screen readers, which
+/// otherwise cannot see it. The node covers `rect` and reads out `label`.
+pub fn describe(ui: &Ui, rect: Rect, label: &str) {
+    let id = ui.id().with((
+        "described",
+        label,
+        rect.min.x.round() as i32,
+        rect.min.y.round() as i32,
+    ));
+    ui.interact(rect, id, Sense::hover())
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), label));
+}
+
 /// Single-choice row with a check on the right of the chosen option.
 pub fn menu_item(ui: &mut Ui, selected: bool, label: &str) -> Response {
     let p = pal(ui);

@@ -59,6 +59,9 @@ fn fixture() -> MonitorApp {
         timeline_mode: Default::default(),
         focus_sent: None,
         alerts_sent: Default::default(),
+        notice_seen: None,
+        pause_sent: false,
+        tooltip_revision: 0,
         cap_input: String::new(),
         breakdown_cache: Arc::default(),
         breakdown_cache_key: None,
@@ -1496,8 +1499,8 @@ fn control_number_keys_switch_pages_and_escape_clears_the_selection() {
     send(&mut app, Key::Num2, Modifiers::COMMAND);
     assert!(app.page == Page::Connections);
     assert!(
-        app.selected_app.is_none(),
-        "Changing page clears the selection"
+        app.selected_app.is_some(),
+        "The selection is kept for when the user comes back"
     );
     send(&mut app, Key::Num4, Modifiers::COMMAND);
     assert!(app.page == Page::Settings);
@@ -1522,4 +1525,80 @@ fn saved_settings_from_before_system_theme_keep_their_palette() {
         "An existing choice is not overridden"
     );
     assert!(Settings::default().theme == Theme::Dark && !Settings::default().follow_system);
+}
+
+#[test]
+fn the_tray_tooltip_shows_live_speeds_and_when_recording_is_paused() {
+    let mut app = app_fixture();
+    let snapshot = Arc::make_mut(&mut app.data.snapshot);
+    snapshot.interval = 1.0;
+    snapshot.live_rows = vec![UsageRow {
+        source: "adapter".into(),
+        adapter_id: "eth".into(),
+        down: 2_097_152,
+        up: 1_024,
+        ..Default::default()
+    }];
+    app.settings.filter.source = Source::Adapter;
+    let text = app.tray_tooltip();
+    assert!(text.starts_with("OpenNetworkMonitor"));
+    assert!(text.contains("↓ 2.00 MiB/s"), "{text}");
+    assert!(text.contains("↑ 1.00 KiB/s"), "{text}");
+    assert!(!text.contains("paused"));
+    Arc::make_mut(&mut app.data.snapshot).recording_paused = true;
+    assert!(app.tray_tooltip().ends_with("Recording paused"));
+    app.settings.bits = true;
+    assert!(app.tray_tooltip().contains("bit/s"));
+}
+
+#[test]
+fn painted_figures_are_readable_by_screen_readers() {
+    let ctx = context(Theme::Dark);
+    ctx.enable_accesskit();
+    let size = Vec2::new(1200.0, 820.0);
+    let labels_of = |app: &mut MonitorApp, page: Page| -> Vec<String> {
+        app.page = page;
+        let mut labels = Vec::new();
+        for _ in 0..2 {
+            let mut out = shell_frame(app, &ctx, size, vec![]);
+            out.textures_delta.clear();
+            if let Some(update) = out.platform_output.accesskit_update {
+                labels.extend(
+                    update
+                        .nodes
+                        .iter()
+                        .flat_map(|(_, node)| [node.label(), node.value()])
+                        .flatten()
+                        .map(str::to_owned),
+                );
+            }
+        }
+        labels
+    };
+    let mut app = app_fixture();
+    app.settings.filter.source = Source::Adapter;
+    app.data.history = Arc::new(History {
+        down: 5 * 1024 * 1024,
+        up: 1024,
+        ..Default::default()
+    });
+    let overview = labels_of(&mut app, Page::Overview);
+    let has = |labels: &[String], part: &str| labels.iter().any(|label| label.contains(part));
+    assert!(has(&overview, "Downloaded: 5.00 MiB"), "{overview:?}");
+    assert!(has(&overview, "Uploaded: 1.00 KiB"), "{overview:?}");
+    assert!(has(&overview, "now "), "Legend entries read their speed");
+    assert!(has(&overview, "Chart of download and upload"));
+
+    Arc::make_mut(&mut app.data.snapshot).connections = vec![Connection {
+        pid: 42,
+        app: "C:/Apps/browser.exe".into(),
+        local: "10.0.0.2:5000".into(),
+        remote: "203.0.113.9:443".into(),
+        country: "DE".into(),
+        protocol: "TCP4".into(),
+        state: "Established".into(),
+    }];
+    let connections = labels_of(&mut app, Page::Connections);
+    assert!(has(&connections, "PID 42"), "{connections:?}");
+    assert!(has(&connections, "203.0.113.9:443"));
 }

@@ -58,6 +58,9 @@ impl MonitorApp {
             timeline_mode: Default::default(),
             focus_sent: None,
             alerts_sent: Default::default(),
+            notice_seen: None,
+            pause_sent: false,
+            tooltip_revision: 0,
             cap_input: "100".into(),
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
@@ -365,6 +368,14 @@ mod render_tests {
             ("apps-small", "apps", false, [960.0, 680.0], vec![]),
             ("apps-timeline", "apps", false, [1200.0, 820.0], vec![]),
             ("apps-timeline-small", "apps", true, [960.0, 680.0], vec![]),
+            ("overview-intro", "overview", false, wide, vec![]),
+            (
+                "overview-intro-small",
+                "overview",
+                true,
+                [960.0, 680.0],
+                vec![],
+            ),
             (
                 "apps-timeline-daily",
                 "apps",
@@ -459,6 +470,9 @@ mod render_tests {
                     limit: 100 * 1_073_741_824,
                     cycle_start: chrono::Utc::now().timestamp() - 20 * 86_400,
                 });
+            }
+            if name.starts_with("overview-intro") {
+                app.settings.intro_seen = Some(false);
             }
             if name.starts_with("apps-timeline") {
                 let now = chrono::Utc::now().timestamp() / 60 * 60;

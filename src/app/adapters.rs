@@ -135,6 +135,7 @@ fn adapter_card(ui: &mut egui::Ui, a: &Adapter, down: &str, up: &str) -> bool {
                 p.text,
                 p.dim,
             );
+            widgets::describe(ui, cell, &format!("{label}: {value}"));
         }
         if !a.addresses.is_empty() {
             ui.add_space(10.0);

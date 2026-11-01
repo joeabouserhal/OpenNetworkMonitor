@@ -1,6 +1,6 @@
 use crate::{
     alerts::AlertConfig,
-    graph::{Graph, format_number},
+    graph::Graph,
     icons::IconCache,
     model::*,
     store::Store,
@@ -51,6 +51,9 @@ struct Settings {
     wide_summary_initialized: bool,
     /// Follow the Windows light/dark setting instead of `theme`.
     follow_system: bool,
+    /// Whether the welcome card has been dismissed. Unknown (none) in settings saved
+    /// before it existed, which are treated as already seen.
+    intro_seen: Option<bool>,
     alert_new_apps: bool,
     cap_enabled: bool,
     /// Monthly allowance in GiB.
@@ -82,6 +85,7 @@ impl Default for Settings {
             ui_scale: 0.9,
             wide_summary_initialized: false,
             follow_system: false,
+            intro_seen: None,
             alert_new_apps: false,
             cap_enabled: false,
             cap_gib: 100.0,
@@ -188,6 +192,12 @@ pub struct MonitorApp {
     timeline_mode: app_timeline::TimelineMode,
     /// The app whose timeline the worker was last asked to read.
     focus_sent: Option<(String, SeriesView)>,
+    /// The pause choice the worker was last given.
+    pause_sent: bool,
+    /// The last time the tray tooltip was refreshed, by snapshot.
+    tooltip_revision: u64,
+    /// The message in the banner and when this window first showed it.
+    notice_seen: Option<(String, Instant)>,
     /// The alert choices the worker was last given.
     alerts_sent: AlertConfig,
     /// The allowance as typed, so a half-typed number is not rewritten.
@@ -211,6 +221,7 @@ impl MonitorApp {
         let mut settings = saved.unwrap_or_default();
         // New installs match Windows; a saved choice is never changed behind its back.
         settings.follow_system |= first_run;
+        settings.intro_seen.get_or_insert(!first_run);
         settings.filter.search.clear();
         settings.filter.apps.clear();
         settings.filter.scope = Scope::All;
@@ -291,6 +302,9 @@ impl MonitorApp {
             timeline_mode: Default::default(),
             focus_sent: None,
             alerts_sent: AlertConfig::default(),
+            notice_seen: None,
+            pause_sent: false,
+            tooltip_revision: 0,
             cap_input,
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
@@ -315,6 +329,19 @@ impl MonitorApp {
         self.data.classified = ScopeTotals::default();
         self.data.top_apps.clear();
     }
+    /// What the tray icon says: the current speeds, or that recording is paused.
+    fn tray_tooltip(&self) -> String {
+        let (down, up) = self.live_rates(Source::Adapter);
+        let mut text = format!(
+            "OpenNetworkMonitor\n↓ {}   ↑ {}",
+            self.rate(down),
+            self.rate(up)
+        );
+        if self.data.snapshot.recording_paused {
+            text.push_str("\nRecording paused");
+        }
+        text
+    }
     /// Keyboard shortcuts that work on every page. Typing in a field is left alone.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
@@ -332,10 +359,7 @@ impl MonitorApp {
         });
         if let Some(index) = page {
             let target = Page::ALL[index];
-            if self.page != target {
-                self.page = target;
-                self.selected_app = None;
-            }
+            self.page = target;
         }
         if search {
             ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(widgets::SEARCH_ID)));
@@ -370,7 +394,7 @@ impl MonitorApp {
             } else if !self.app_search.is_empty() {
                 filter.apps = self.app_totals().iter().map(|a| a.path.clone()).collect();
                 if filter.apps.is_empty() {
-                    filter.apps.insert("__none__".into());
+                    filter.apps.insert(NO_APPS.into());
                 }
             }
         }
@@ -423,11 +447,7 @@ impl MonitorApp {
         (down as f64 / interval, up as f64 / interval)
     }
     fn rate(&self, value: f64) -> String {
-        if self.settings.bits {
-            format!("{}bit/s", format_number(value * 8.0))
-        } else {
-            format!("{}/s", format_bytes(value))
-        }
+        crate::graph::speed_label(value, self.settings.bits)
     }
     fn label(&self, path: &str) -> String {
         self.data
@@ -591,6 +611,20 @@ impl eframe::App for MonitorApp {
             .then(|| self.selected_app.clone())
             .flatten()
             .map(|app| (app, self.timeline_mode.view()));
+        if let Some(tray) = &self.tray {
+            let paused = tray.paused.load(Ordering::Acquire);
+            if paused != self.pause_sent {
+                let _ = self.worker.tx.send(Command::Pause(paused));
+                self.pause_sent = paused;
+            }
+            if tray.open_settings.swap(false, Ordering::AcqRel) {
+                self.page = Page::Settings;
+            }
+            if self.tooltip_revision != self.data.revision {
+                self.tooltip_revision = self.data.revision;
+                tray.set_tooltip(&self.tray_tooltip());
+            }
+        }
         let alerts = self.settings.alert_config();
         if alerts != self.alerts_sent {
             let _ = self.worker.tx.send(Command::Alerts(alerts));
@@ -662,17 +696,17 @@ fn toggle_adapter(
     if selected.is_empty() {
         *selected = adapters.iter().map(|a| a.id.clone()).collect();
         if include_unassigned {
-            selected.insert("unassigned".into());
+            selected.insert(UNASSIGNED_ADAPTER.into());
         }
     }
-    selected.remove("__none__");
+    selected.remove(NO_ADAPTERS);
     if enabled {
         selected.insert(id.into());
     } else {
         selected.remove(id);
     }
     if selected.is_empty() {
-        selected.insert("__none__".into());
+        selected.insert(NO_ADAPTERS.into());
     }
 }
 fn initial_wide_size(current: Vec2, monitor: Option<Vec2>) -> Vec2 {

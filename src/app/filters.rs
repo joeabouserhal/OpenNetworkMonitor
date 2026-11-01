@@ -39,12 +39,12 @@ impl MonitorApp {
                 }
                 if self.settings.filter.source == Source::Transport {
                     let mut checked = self.settings.filter.adapters.is_empty()
-                        || self.settings.filter.adapters.contains("unassigned");
+                        || self.settings.filter.adapters.contains(UNASSIGNED_ADAPTER);
                     if check_item(ui, &mut checked, "Unassigned traffic") {
                         toggle_adapter(
                             &mut self.settings.filter.adapters,
                             &self.data.snapshot.adapters,
-                            "unassigned",
+                            UNASSIGNED_ADAPTER,
                             checked,
                             true,
                         );
@@ -95,7 +95,7 @@ impl MonitorApp {
     pub(super) fn adapter_filter_caption(&self) -> (String, String, String) {
         let adapters = if self.settings.filter.adapters.is_empty() {
             "All adapters".to_owned()
-        } else if self.settings.filter.adapters.contains("__none__") {
+        } else if self.settings.filter.adapters.contains(NO_ADAPTERS) {
             "No adapters".to_owned()
         } else {
             format!("{} adapters selected", self.settings.filter.adapters.len())
