@@ -131,8 +131,9 @@ impl Geo {
         let value = self
             .reader
             .as_ref()
-            .and_then(|r| r.lookup::<maxminddb::geoip2::Country>(ip).ok().flatten())
-            .and_then(|c| c.country.and_then(|c| c.iso_code).map(str::to_owned))
+            .and_then(|r| r.lookup(ip).ok())
+            .and_then(|found| found.decode::<maxminddb::geoip2::Country>().ok().flatten())
+            .and_then(|c| c.country.iso_code.map(str::to_owned))
             .unwrap_or_else(|| "Unknown".into());
         if self.cache.len() >= 4096 {
             self.cache.clear();
