@@ -166,6 +166,7 @@ impl MonitorApp {
                 format!("Tray unavailable: {e}. Closing the window will exit."),
             ),
         };
+        crate::tray::remember_window(cc);
         // A newer build asks this copy to exit the same way Tray > Exit does, so data is saved first.
         let exit = tray.as_ref().map_or_else(
             || Arc::new(std::sync::atomic::AtomicBool::new(false)),

@@ -29,7 +29,7 @@ impl MonitorApp {
         ui.allocate_ui(Vec2::new(ui.available_width(), lists_height), |ui| {
             widgets::columns(
                 ui,
-                [Col::Flex(1.15), Col::Flex(1.0), Col::Flex(0.85)],
+                [Col::Flex(1.0), Col::Flex(1.0), Col::Flex(1.0)],
                 12.0,
                 |cols| {
                     let [apps, hosts, types] = cols;

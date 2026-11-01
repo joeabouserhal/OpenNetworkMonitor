@@ -255,6 +255,13 @@ fn app_lists_fit_and_keep_the_directory_directly_below_the_name() {
         };
         let (apps, hosts, types) = (at("Apps"), at("Hosts"), at("Traffic type"));
         assert!(apps.x < hosts.x && hosts.x < types.x);
+        // The three lists share the width equally, so their headings are evenly spaced.
+        assert!(
+            ((hosts.x - apps.x) - (types.x - hosts.x)).abs() <= 1.5,
+            "Columns differ: {} then {}",
+            hosts.x - apps.x,
+            types.x - hosts.x
+        );
         assert!((apps.y - hosts.y).abs() < 1.0 && (hosts.y - types.y).abs() < 1.0);
         let name = at("Friendly Browser");
         let directory = at(r"C:\Apps\Long application directory 0");
