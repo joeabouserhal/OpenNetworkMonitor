@@ -136,7 +136,7 @@ try {
     Write-Host "App: $packagedExe"
     Write-Host "ZIP: $archive"
     Write-Host "SHA256: $hash"
-    Write-Host 'Exit any older running copy from its tray before opening the new executable.'
+    Write-Host 'Opening this build replaces an older running build that supports hand-over. If it does not, exit that copy from its tray first.'
 } finally {
     Pop-Location
 }

@@ -59,7 +59,7 @@ impl Tray {
         Ok(Self { _icon: tray, exit })
     }
 }
-fn request_exit(ctx: &egui::Context, exit: &AtomicBool) {
+pub fn request_exit(ctx: &egui::Context, exit: &AtomicBool) {
     exit.store(true, Ordering::Release);
     // eframe saves state and joins the worker before destroying its window.
     // Hide it first so those necessary final writes don't leave it on screen.

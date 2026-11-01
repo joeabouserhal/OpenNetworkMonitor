@@ -1,5 +1,5 @@
 use crate::model::{Adapter, Connection, ipv4_from_windows};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
@@ -9,8 +9,7 @@ use std::{
 use windows_sys::Win32::{
     Devices::DeviceAndDriverInstallation::*,
     Foundation::{
-        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE,
-        INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
     },
     NetworkManagement::IpHelper::*,
     Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC},
@@ -117,38 +116,13 @@ pub fn all_adapters() -> Result<Vec<Adapter>> {
     result.sort_by_key(|a| (!a.up, !a.physical, a.name.clone()));
     Ok(result)
 }
-struct OwnedHandle(HANDLE);
+pub(super) struct OwnedHandle(pub(super) HANDLE);
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         // SAFETY: this guard owns a successfully created kernel handle.
         unsafe {
             CloseHandle(self.0);
         }
-    }
-}
-pub struct InstanceGuard {
-    _handle: OwnedHandle,
-}
-impl InstanceGuard {
-    pub fn acquire() -> Result<Self> {
-        Self::try_acquire()?
-            .context("OpenNetworkMonitor is already running. Open it from its system tray icon.")
-    }
-    pub fn try_acquire() -> Result<Option<Self>> {
-        let name: Vec<u16> = "Local\\OpenNetworkMonitor.Collector.v1\0"
-            .encode_utf16()
-            .collect();
-        // SAFETY: null security attributes and a terminated name are accepted by CreateMutexW.
-        let handle = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
-        if handle.is_null() {
-            bail!("Cannot create application lock");
-        }
-        let guard = OwnedHandle(handle);
-        // SAFETY: GetLastError reads the last API result for this thread.
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            return Ok(None);
-        }
-        Ok(Some(Self { _handle: guard }))
     }
 }
 pub fn process_names() -> Result<HashMap<u32, String>> {

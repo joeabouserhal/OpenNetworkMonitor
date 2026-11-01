@@ -43,18 +43,19 @@ fn run() -> Result<()> {
         return diagnose(&args);
     }
     let startup = args.iter().any(|a| a == "--startup");
-    let _instance = if startup {
+    let data_dir =
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
+            .join("OpenNetworkMonitor");
+    std::fs::create_dir_all(&data_dir)?;
+    let mut instance = if startup {
         let Some(instance) = capture::InstanceGuard::try_acquire()? else {
             return Ok(());
         };
         instance
     } else {
-        capture::InstanceGuard::acquire()?
+        capture::InstanceGuard::acquire_or_replace(&data_dir)?
     };
-    let data_dir =
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
-            .join("OpenNetworkMonitor");
-    std::fs::create_dir_all(&data_dir)?;
+    instance.publish(&data_dir);
     let store = store::Store::open(&data_dir.join("usage.db"))?;
     let icon = eframe::egui::IconData {
         rgba: tray::icon_pixels(),

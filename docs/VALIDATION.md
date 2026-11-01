@@ -12,7 +12,7 @@ Seven live-machine probes are ignored by default. They read Windows startup stat
 
 ## UI review
 
-The production egui layout is checked at supported window sizes, all four palettes and 80–110% interface size. Pointer-event tests cover navigation (including the collapsed icon rail), the Overall/App traffic switch, chart legend toggles, app selection/clearing, period and network changes, multi-adapter selection, and the theme, speed-unit and interface-size settings. Every outline on every page is checked to be a whole number of physical pixels at several display scalings so borders stay crisp. An optional offscreen renderer produces sample-data previews without desktop capture or user history; see the README's UI development section. Repository screenshots use generated data.
+The production egui layout is checked at supported window sizes, all four palettes and 80–110% interface size. Instance tests launch a second real process to confirm a newer build asks the running copy to exit and takes over. Pointer-event tests cover navigation (including the collapsed icon rail), the Overall/App traffic switch, chart legend toggles, app selection/clearing, period and network changes, multi-adapter selection, and the theme, speed-unit and interface-size settings. Every outline on every page is checked to be a whole number of physical pixels at several display scalings so borders stay crisp. An optional offscreen renderer produces sample-data previews without desktop capture or user history; see the README's UI development section. Repository screenshots use generated data.
 
 ## Measurement and validation limits
 

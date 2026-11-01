@@ -152,6 +152,16 @@ impl MonitorApp {
                 format!("Tray unavailable: {e}. Closing the window will exit."),
             ),
         };
+        // A newer build asks this copy to exit the same way Tray > Exit does, so data is saved first.
+        let exit = tray.as_ref().map_or_else(
+            || Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            |tray| tray.exit.clone(),
+        );
+        let wake = cc.egui_ctx.clone();
+        crate::capture::spawn_quit_listener(move || {
+            crate::tray::request_exit(&wake, &exit);
+            wake.request_repaint();
+        });
         if std::env::args().any(|arg| arg == "--startup") {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Visible(tray.is_none()));
