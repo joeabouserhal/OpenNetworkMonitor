@@ -98,13 +98,10 @@ impl MonitorApp {
             });
         }
         ui.add_space(28.0);
-        for page in [
-            Page::Overview,
-            Page::Connections,
-            Page::Adapters,
-            Page::Settings,
-        ] {
-            if widgets::navigation(ui, page.label(), page.icon(), self.page == page, rail).clicked()
+        for (index, page) in Page::ALL.into_iter().enumerate() {
+            if widgets::navigation(ui, page.label(), page.icon(), self.page == page, rail)
+                .on_hover_text(format!("{} (Ctrl+{})", page.label(), index + 1))
+                .clicked()
             {
                 self.page = page;
                 self.selected_app = None;
@@ -127,6 +124,18 @@ impl MonitorApp {
                 return;
             }
             ui.add_space(2.0);
+            if let Some(cap) = self.data.cap {
+                let share = cap.used as f64 / cap.limit.max(1) as f64 * 100.0;
+                ui.label(
+                    RichText::new(format!("Data cap {share:.0}% used"))
+                        .size(12.5)
+                        .color(match crate::alerts::cap_level(cap.used, cap.limit) {
+                            crate::alerts::CapLevel::Below => p.dim,
+                            crate::alerts::CapLevel::Warning => p.warn,
+                            crate::alerts::CapLevel::Reached => p.bad,
+                        }),
+                );
+            }
             ui.label(
                 RichText::new(format!(
                     "{} adapters · {} connections",

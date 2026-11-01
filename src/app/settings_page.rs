@@ -1,4 +1,5 @@
 use super::*;
+use chrono::TimeZone as _;
 use eframe::egui::{Align, Align2, Layout, Margin, Pos2, Rect, Sense, Shape, StrokeKind};
 use widgets::{
     ButtonKind, bold, divider, paint_text, pal, radius, sans, setting_row, strong_text, thin,
@@ -16,6 +17,40 @@ fn section(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
             ui.spacing_mut().item_spacing.y = 0.0;
             rows(ui);
         });
+}
+
+/// How much of this month's allowance is used, with the date it began.
+fn cap_meter(ui: &mut egui::Ui, cap: crate::worker::CapStatus) {
+    let p = pal(ui);
+    let share = (cap.used as f64 / cap.limit.max(1) as f64).clamp(0.0, 1.0) as f32;
+    let tone = match crate::alerts::cap_level(cap.used, cap.limit) {
+        crate::alerts::CapLevel::Below => p.accent,
+        crate::alerts::CapLevel::Warning => p.warn,
+        crate::alerts::CapLevel::Reached => p.bad,
+    };
+    let since = chrono::Local
+        .timestamp_opt(cap.cycle_start, 0)
+        .single()
+        .map(|time| time.format("%d %b").to_string())
+        .unwrap_or_default();
+    ui.label(
+        RichText::new(format!(
+            "{} of {} used since {since} ({:.0}%)",
+            format_bytes(cap.used as f64),
+            format_bytes(cap.limit as f64),
+            share * 100.0
+        ))
+        .size(13.5)
+        .color(p.text),
+    );
+    ui.add_space(6.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
+    ui.painter().rect_filled(rect, radius(4.0), p.raised);
+    ui.painter().rect_filled(
+        Rect::from_min_size(rect.min, Vec2::new(rect.width() * share, rect.height())),
+        radius(4.0),
+        tone,
+    );
 }
 
 /// Preview tiles that show each palette's canvas, card and data colours.
@@ -113,10 +148,29 @@ impl MonitorApp {
             ui.add_space(2.0);
             ui.label(RichText::new("Choose a palette.").size(13.5).weak());
             ui.add_space(12.0);
-            if theme_picker(ui, &mut self.settings.theme) {
-                self.settings.theme.apply(ui.ctx());
+            let mut shown = self.settings.active_theme(ui.ctx());
+            if theme_picker(ui, &mut shown) {
+                // Choosing a palette by hand ends following Windows.
+                self.settings.theme = shown;
+                self.settings.follow_system = false;
+                shown.apply(ui.ctx());
+                self.applied_theme = shown;
             }
             ui.add_space(16.0);
+            divider(ui);
+            setting_row(
+                ui,
+                "Match Windows appearance",
+                "Switches between Slate and Light with the Windows light or dark setting.",
+                56.0,
+                |ui| {
+                    widgets::toggle(
+                        ui,
+                        &mut self.settings.follow_system,
+                        "Match Windows appearance",
+                    );
+                },
+            );
             divider(ui);
             let before = self.settings.ui_scale;
             setting_row(
@@ -336,6 +390,76 @@ impl MonitorApp {
                 }
             });
             ui.add_space(14.0);
+        });
+        section(ui, "Alerts", |ui| {
+            setting_row(
+                ui,
+                "New app on the network",
+                "Notify the first time an app is seen using the network.",
+                56.0,
+                |ui| {
+                    widgets::toggle(
+                        ui,
+                        &mut self.settings.alert_new_apps,
+                        "New app on the network",
+                    );
+                },
+            );
+            divider(ui);
+            setting_row(
+                ui,
+                "Monthly data cap",
+                "Notify at 80% and when the allowance is used up. Usage counts all adapters.",
+                56.0,
+                |ui| {
+                    widgets::toggle(ui, &mut self.settings.cap_enabled, "Monthly data cap");
+                },
+            );
+            if self.settings.cap_enabled {
+                divider(ui);
+                setting_row(ui, "Allowance", "In GiB for each month.", 150.0, |ui| {
+                    ui.label(RichText::new("GiB").size(13.5).weak());
+                    let edit = period::input_frame(ui)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.cap_input)
+                                    .font(widgets::mono(14.0))
+                                    .char_limit(7)
+                                    .desired_width(64.0)
+                                    .frame(egui::Frame::NONE),
+                            )
+                        })
+                        .inner;
+                    if edit.changed()
+                        && let Ok(value) = self.cap_input.trim().parse::<f32>()
+                        && value.is_finite()
+                        && value > 0.0
+                    {
+                        self.settings.cap_gib = value.min(1_000_000.0);
+                    }
+                    if edit.lost_focus() {
+                        self.cap_input = format_allowance(self.settings.cap_gib);
+                    }
+                });
+                divider(ui);
+                let mut day = f32::from(self.settings.cap_reset_day);
+                setting_row(
+                    ui,
+                    "Starts over on day",
+                    "The day of the month the allowance resets.",
+                    260.0,
+                    |ui| {
+                        ui.label(RichText::new(format!("{day:.0}")).font(bold(14.0)));
+                        widgets::slider(ui, &mut day, 1.0..=28.0, 1.0, 190.0, "Reset day");
+                    },
+                );
+                self.settings.cap_reset_day = day.round().clamp(1.0, 28.0) as u8;
+                if let Some(cap) = self.data.cap {
+                    ui.add_space(4.0);
+                    cap_meter(ui, cap);
+                    ui.add_space(14.0);
+                }
+            }
         });
         section(ui, "History & exports", |ui| {
             ui.add_space(14.0);

@@ -6,6 +6,8 @@ use widgets::{Col, Icon, Palette, badge, bold, paint_icon, paint_text, pal, radi
 
 const USAGE_ROW_HEIGHT: f32 = widgets::ROW_HEIGHT;
 const STRIP_HEIGHT: f32 = 58.0;
+/// Height of the selected app's timeline, axis labels included.
+const TIMELINE_CHART_HEIGHT: f32 = 120.0;
 
 impl MonitorApp {
     pub(super) fn applications(&mut self, ui: &mut egui::Ui) {
@@ -24,6 +26,10 @@ impl MonitorApp {
             self.selected_app = None;
         }
         let data = self.traffic_breakdown(&totals);
+        if self.selected_app.is_some() {
+            self.app_timeline_card(ui, &totals);
+            ui.add_space(12.0);
+        }
         let lists_height = (ui.available_height() - STRIP_HEIGHT - 12.0).max(120.0);
         let mut visible_hosts = Vec::new();
         ui.allocate_ui(Vec2::new(ui.available_width(), lists_height), |ui| {
@@ -143,6 +149,71 @@ impl MonitorApp {
             let _ = self.worker.tx.send(Command::ResolveHosts(visible_hosts));
             self.host_request = Some(Instant::now());
         }
+    }
+}
+
+impl MonitorApp {
+    /// The selected app's usage over the period, with a switch between bars sized to
+    /// the period and calendar days or months.
+    fn app_timeline_card(&mut self, ui: &mut egui::Ui, totals: &[AppTotal]) {
+        let Some(path) = self.selected_app.clone() else {
+            return;
+        };
+        let name = totals
+            .iter()
+            .find(|total| total.path == path)
+            .map_or_else(|| self.label(&path), |total| total.name.clone());
+        let series = self.data.app_series.clone().filter(|series| {
+            series.app == path
+                && series.revision == self.filter_revision
+                && series.view == self.timeline_mode.view()
+        });
+        widgets::surface(ui)
+            .inner_margin(Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.horizontal(|ui| {
+                    ui.set_min_height(widgets::CONTROL_HEIGHT);
+                    ui.label(widgets::strong_text(&name, 15.5));
+                    if let Some(caption) = self.timeline_mode.span_caption() {
+                        ui.label(
+                            RichText::new(format!("· {caption}, whatever the period"))
+                                .size(13.5)
+                                .weak(),
+                        );
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        widgets::segmented(
+                            ui,
+                            "app-timeline-mode",
+                            &mut self.timeline_mode,
+                            &app_timeline::TimelineMode::ALL,
+                        );
+                    });
+                });
+                ui.add_space(8.0);
+                match series {
+                    Some(series) => {
+                        let bars = app_timeline::bars(&series, self.timeline_mode);
+                        app_timeline::show(ui, &bars, TIMELINE_CHART_HEIGHT);
+                    }
+                    None => {
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), TIMELINE_CHART_HEIGHT),
+                            egui::Sense::hover(),
+                        );
+                        widgets::paint_text(
+                            ui.painter(),
+                            rect,
+                            Align2::CENTER_CENTER,
+                            "Loading usage…",
+                            sans(13.5),
+                            pal(ui).dim,
+                        );
+                    }
+                }
+            });
     }
 }
 

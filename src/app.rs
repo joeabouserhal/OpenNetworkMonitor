@@ -1,4 +1,5 @@
 use crate::{
+    alerts::AlertConfig,
     graph::{Graph, format_number},
     icons::IconCache,
     model::*,
@@ -19,7 +20,9 @@ use std::{
 };
 
 mod adapters;
+mod app_timeline;
 mod apps;
+mod connection_tools;
 mod connections;
 mod dialogs;
 mod filters;
@@ -46,6 +49,27 @@ struct Settings {
     bits: bool,
     ui_scale: f32,
     wide_summary_initialized: bool,
+    /// Follow the Windows light/dark setting instead of `theme`.
+    follow_system: bool,
+    alert_new_apps: bool,
+    cap_enabled: bool,
+    /// Monthly allowance in GiB.
+    cap_gib: f32,
+    /// Day of the month, 1 to 28, on which the allowance starts over.
+    cap_reset_day: u8,
+}
+impl Settings {
+    fn alert_config(&self) -> AlertConfig {
+        AlertConfig {
+            new_apps: self.alert_new_apps,
+            cap_bytes: (self.cap_enabled && self.cap_gib > 0.0)
+                .then(|| (f64::from(self.cap_gib) * 1_073_741_824.0) as u64),
+            reset_day: self.cap_reset_day.clamp(1, 28),
+        }
+    }
+    fn active_theme(&self, ctx: &egui::Context) -> Theme {
+        Theme::resolve(self.follow_system, ctx.system_theme(), self.theme)
+    }
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -57,6 +81,11 @@ impl Default for Settings {
             bits: false,
             ui_scale: 0.9,
             wide_summary_initialized: false,
+            follow_system: false,
+            alert_new_apps: false,
+            cap_enabled: false,
+            cap_gib: 100.0,
+            cap_reset_day: 1,
         }
     }
 }
@@ -69,6 +98,13 @@ enum Page {
     Settings,
 }
 impl Page {
+    /// In sidebar order, which is also the Ctrl+1 to Ctrl+4 order.
+    const ALL: [Self; 4] = [
+        Self::Overview,
+        Self::Connections,
+        Self::Adapters,
+        Self::Settings,
+    ];
     fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
@@ -89,7 +125,13 @@ impl Page {
 /// The filtered Connections list, remembered until a new snapshot or search.
 #[derive(Default)]
 struct ConnectionCache {
-    key: Option<(u64, String)>,
+    key: Option<(
+        u64,
+        String,
+        Option<connection_tools::Sort>,
+        connection_tools::ProtocolFilter,
+        connection_tools::StatusFilter,
+    )>,
     rows: Arc<Vec<(usize, String)>>,
 }
 /// History bytes per app, remembered until the next history load.
@@ -139,25 +181,42 @@ pub struct MonitorApp {
     history_totals: HistoryTotals,
     dialogs: dialogs::FileDialogs,
     connection_cache: ConnectionCache,
+    connection_sort: Option<connection_tools::Sort>,
+    protocol_filter: connection_tools::ProtocolFilter,
+    status_filter: connection_tools::StatusFilter,
+    pending_end: Option<(u32, String)>,
+    timeline_mode: app_timeline::TimelineMode,
+    /// The app whose timeline the worker was last asked to read.
+    focus_sent: Option<(String, SeriesView)>,
+    /// The alert choices the worker was last given.
+    alerts_sent: AlertConfig,
+    /// The allowance as typed, so a half-typed number is not rewritten.
+    cap_input: String,
     breakdown_cache: Arc<Breakdown>,
     breakdown_cache_key: Option<(u64, u64, u64, String, Option<String>)>,
     host_request: Option<Instant>,
     /// Theme the title bar was last coloured for.
     titlebar: Option<Theme>,
+    /// Theme whose palette is installed in the window.
+    applied_theme: Theme,
     /// The last window record eframe saved that described a real window.
     window_record: Option<String>,
 }
 impl MonitorApp {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, data_dir: PathBuf) -> Result<Self> {
-        let mut settings = cc
+        let saved = cc
             .storage
-            .and_then(|s| eframe::get_value::<Settings>(s, "settings"))
-            .unwrap_or_default();
+            .and_then(|s| eframe::get_value::<Settings>(s, "settings"));
+        let first_run = saved.is_none();
+        let mut settings = saved.unwrap_or_default();
+        // New installs match Windows; a saved choice is never changed behind its back.
+        settings.follow_system |= first_run;
         settings.filter.search.clear();
         settings.filter.apps.clear();
         settings.filter.scope = Scope::All;
         install_fonts(&cc.egui_ctx);
-        settings.theme.apply(&cc.egui_ctx);
+        let active_theme = settings.active_theme(&cc.egui_ctx);
+        active_theme.apply(&cc.egui_ctx);
         let window_record = cc
             .storage
             .and_then(|storage| storage.get_string(WINDOW_KEY))
@@ -165,11 +224,12 @@ impl MonitorApp {
         // Done before the window is first shown so the title bar never flashes its default colour.
         let titlebar = crate::titlebar::apply(
             cc,
-            crate::titlebar::Colors::from_palette(&settings.theme.palette()),
+            crate::titlebar::Colors::from_palette(&active_theme.palette()),
         )
-        .then_some(settings.theme);
+        .then_some(active_theme);
         settings.ui_scale = valid_ui_scale(settings.ui_scale);
         cc.egui_ctx.set_zoom_factor(settings.ui_scale);
+        let cap_input = format_allowance(settings.cap_gib);
         let worker = Worker::start(
             store,
             settings.filter.clone(),
@@ -224,10 +284,19 @@ impl MonitorApp {
             history_totals: HistoryTotals::default(),
             dialogs: dialogs::FileDialogs::default(),
             connection_cache: ConnectionCache::default(),
+            connection_sort: None,
+            protocol_filter: Default::default(),
+            status_filter: Default::default(),
+            pending_end: None,
+            timeline_mode: Default::default(),
+            focus_sent: None,
+            alerts_sent: AlertConfig::default(),
+            cap_input,
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
             host_request: None,
             titlebar,
+            applied_theme: active_theme,
             window_record,
         })
     }
@@ -245,6 +314,38 @@ impl MonitorApp {
         self.data.history = Arc::default();
         self.data.classified = ScopeTotals::default();
         self.data.top_apps.clear();
+    }
+    /// Keyboard shortcuts that work on every page. Typing in a field is left alone.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        let (page, search, export, escape) = ctx.input_mut(|input| {
+            let command = Modifiers::COMMAND;
+            let page = [Key::Num1, Key::Num2, Key::Num3, Key::Num4]
+                .into_iter()
+                .position(|key| input.consume_key(command, key));
+            (
+                page,
+                input.consume_key(command, Key::F),
+                input.consume_key(command, Key::E),
+                input.key_pressed(Key::Escape),
+            )
+        });
+        if let Some(index) = page {
+            let target = Page::ALL[index];
+            if self.page != target {
+                self.page = target;
+                self.selected_app = None;
+            }
+        }
+        if search {
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(widgets::SEARCH_ID)));
+        }
+        if export {
+            self.export(ctx);
+        }
+        if escape && !ctx.egui_wants_keyboard_input() && self.selected_app.is_some() {
+            self.selected_app = None;
+        }
     }
     fn switch_source(&mut self, source: Source) {
         if self.settings.filter.source != source {
@@ -473,6 +574,7 @@ impl eframe::App for MonitorApp {
         if let Ok(data) = self.worker.shared.lock() {
             if data.revision != self.data.revision
                 || data.history_generation != self.data.history_generation
+                || data.series_generation != self.data.series_generation
                 || data.notice != self.data.notice
             {
                 self.data = data.clone();
@@ -482,6 +584,21 @@ impl eframe::App for MonitorApp {
                 self.data.classified = ScopeTotals::default();
                 self.data.top_apps.clear();
             }
+        }
+        // Only the app being looked at on the App traffic page needs its own timeline.
+        let focus = (self.page == Page::Overview
+            && self.settings.filter.source == Source::Transport)
+            .then(|| self.selected_app.clone())
+            .flatten()
+            .map(|app| (app, self.timeline_mode.view()));
+        let alerts = self.settings.alert_config();
+        if alerts != self.alerts_sent {
+            let _ = self.worker.tx.send(Command::Alerts(alerts));
+            self.alerts_sent = alerts;
+        }
+        if focus != self.focus_sent {
+            let _ = self.worker.tx.send(Command::FocusApp(focus.clone()));
+            self.focus_sent = focus;
         }
         let exiting = self
             .tray
@@ -497,13 +614,20 @@ impl eframe::App for MonitorApp {
         }
     }
     fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if self.titlebar != Some(self.settings.theme) {
+        let active = self.settings.active_theme(root.ctx());
+        if self.applied_theme != active {
+            active.apply(root.ctx());
+            self.applied_theme = active;
+            root.ctx().request_repaint();
+        }
+        if self.titlebar != Some(active) {
             crate::titlebar::apply(
                 &*frame,
-                crate::titlebar::Colors::from_palette(&self.settings.theme.palette()),
+                crate::titlebar::Colors::from_palette(&active.palette()),
             );
-            self.titlebar = Some(self.settings.theme);
+            self.titlebar = Some(active);
         }
+        self.shortcuts(root.ctx());
         self.draw(root);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -575,6 +699,14 @@ fn format_count(value: u64) -> String {
         out.push(c);
     }
     out
+}
+/// An allowance as shown in its text box: whole numbers without a decimal point.
+fn format_allowance(gib: f32) -> String {
+    if gib.fract() == 0.0 {
+        format!("{gib:.0}")
+    } else {
+        format!("{gib}")
+    }
 }
 fn compact_bytes(value: u64) -> String {
     crate::model::format_compact_bytes(value)

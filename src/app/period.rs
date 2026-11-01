@@ -232,6 +232,9 @@ impl CustomPeriod {
                 .clicked();
             });
         });
+        // Enter applies and Escape closes, like any dialog.
+        apply |= ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        cancel |= ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         (apply, cancel)
     }
 }
@@ -291,7 +294,7 @@ impl CustomPeriod {
         );
     }
 }
-fn input_frame(ui: &egui::Ui) -> egui::Frame {
+pub(super) fn input_frame(ui: &egui::Ui) -> egui::Frame {
     let p = widgets::pal(ui);
     egui::Frame::new()
         .fill(p.sunken)

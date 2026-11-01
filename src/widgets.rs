@@ -51,6 +51,13 @@ impl Palette {
     /// Stores the tokens and restyles egui's own widgets to match.
     pub fn install(self, ctx: &egui::Context) {
         ctx.data_mut(|d| d.insert_temp(Id::new(PALETTE_ID), self));
+        // Visuals are stored per light/dark slot. Pin the slot being written so a
+        // change of the Windows theme cannot swap in egui's own default colours.
+        ctx.set_theme(if self.dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
         install_fonts(ctx);
         self.restyle(ctx);
     }
@@ -1030,6 +1037,23 @@ pub fn slider(
             response.mark_changed();
         }
     }
+    if response.has_focus() {
+        let nudge = ui.input_mut(|input| {
+            let none = egui::Modifiers::NONE;
+            let up = input.consume_key(none, egui::Key::ArrowRight)
+                || input.consume_key(none, egui::Key::ArrowUp);
+            let down = input.consume_key(none, egui::Key::ArrowLeft)
+                || input.consume_key(none, egui::Key::ArrowDown);
+            f32::from(i8::from(up) - i8::from(down))
+        });
+        if nudge != 0.0 {
+            let next = ((*value + nudge * step).clamp(lo, hi) * 100.0).round() / 100.0;
+            if (next - *value).abs() > f32::EPSILON {
+                *value = next;
+                response.mark_changed();
+            }
+        }
+    }
     response.widget_info(|| WidgetInfo::slider(ui.is_enabled(), f64::from(*value), label));
     let t = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
     let rail = Rect::from_center_size(rect.center(), Vec2::new(rect.width() - 20.0, 4.0));
@@ -1062,6 +1086,9 @@ pub fn slider(
 }
 
 /// Pill-shaped text input with a leading magnifier.
+/// The one search box on screen; Ctrl+F focuses it.
+pub const SEARCH_ID: &str = "onm-search";
+
 pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
     let p = pal(ui);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, CONTROL_HEIGHT), Sense::hover());
@@ -1086,6 +1113,7 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> R
     );
     let response = field.add(
         egui::TextEdit::singleline(text)
+            .id(Id::new(SEARCH_ID))
             .hint_text(hint)
             .frame(egui::Frame::NONE)
             .margin(Margin::ZERO)

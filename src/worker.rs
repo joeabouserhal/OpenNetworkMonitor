@@ -1,4 +1,9 @@
-use crate::{capture, model::*, store::Store};
+use crate::{
+    alerts::{AlertConfig, Tracker},
+    capture,
+    model::*,
+    store::Store,
+};
 use anyhow::Result;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -20,9 +25,21 @@ pub struct Shared {
     pub classified: ScopeTotals,
     pub top_apps: Vec<AppUsage>,
     pub history_generation: u64,
+    /// The selected app's own timeline, once read; see `Command::FocusApp`.
+    pub app_series: Option<Arc<AppSeries>>,
+    /// Use of the monthly data cap so far, when a cap is on.
+    pub cap: Option<CapStatus>,
+    pub series_generation: u64,
     pub notice: String,
     pub revision: u64,
     pub history_revision: u64,
+}
+/// This month's use of the data cap, for the meter in the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapStatus {
+    pub used: u64,
+    pub limit: u64,
+    pub cycle_start: i64,
 }
 pub enum Command {
     Filter(Filter, u64),
@@ -32,6 +49,9 @@ pub enum Command {
     ResolveHosts(Vec<String>),
     /// Display names the history reader worked out for the apps it loaded.
     Labels(HashMap<String, String>),
+    /// The app whose timeline the window is showing, and how far back, or none.
+    FocusApp(Option<(String, SeriesView)>),
+    Alerts(AlertConfig),
     Stop,
 }
 pub struct Worker {
@@ -166,6 +186,16 @@ fn read_histories(
     };
     Ok((history, summary))
 }
+/// Tells the user, by toast and by the banner in the window.
+fn announce(
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &eframe::egui::Context,
+    found: crate::alerts::Notice,
+) {
+    notice(shared, format!("{}: {}", found.title, found.body));
+    ctx.request_repaint();
+    crate::notify::deliver(found, |_| {});
+}
 fn export_message(store: &Store, path: &std::path::Path, filter: &Filter, now: i64) -> String {
     match store.export(path, filter, now) {
         Ok(n) => format!("Exported {n} rows to {}", path.display()),
@@ -176,7 +206,10 @@ struct HistoryRequest {
     filter: Filter,
     known: HashSet<String>,
     revision: u64,
+    focus: Option<(String, SeriesView)>,
 }
+/// How long a daily or monthly timeline is reused before it is read again.
+const SERIES_REUSE_SECONDS: i64 = 30;
 /// Reads history, works out app labels and publishes both. Slow for long periods,
 /// so it never runs on the collector thread when the database can be shared.
 fn load_history(
@@ -203,7 +236,44 @@ fn load_history(
         .map(|(i, p)| (i as u32, p))
         .collect();
     let labels = capture::process_labels(&paths);
+    let now = chrono::Utc::now().timestamp();
+    let series = match &request.focus {
+        Some((app, view)) => {
+            // Calendar views cover weeks or months that change slowly, so a read from
+            // the last half minute is reused instead of scanning that history again.
+            let recent = shared
+                .lock()
+                .ok()
+                .and_then(|state| state.app_series.clone())
+                .filter(|held| {
+                    held.app == *app
+                        && held.view == *view
+                        && held.revision == request.revision
+                        && *view != SeriesView::Period
+                        && now - held.read_at < SERIES_REUSE_SECONDS
+                });
+            recent.or_else(|| {
+                store
+                    .app_series(
+                        &effective_filter(&request.filter, &request.known),
+                        app,
+                        now,
+                        *view,
+                    )
+                    .ok()
+                    .map(|mut series| {
+                        series.revision = request.revision;
+                        Arc::new(series)
+                    })
+            })
+        }
+        None => None,
+    };
     if let Ok(mut s) = shared.lock() {
+        if s.app_series.as_deref() != series.as_deref() {
+            s.app_series = series;
+            s.series_generation += 1;
+        }
         // A fixed past period reads back identical data every time; leaving the
         // generation alone spares the window from rebuilding its tables.
         let unchanged = s.history_revision == request.revision
@@ -498,6 +568,11 @@ fn run(
     let mut wifi_catalog_dirty = false;
     let mut previous_wifi = HashMap::<String, String>::new();
     let mut previous = HashMap::<String, (u64, u64)>::new();
+    let mut focus: Option<(String, SeriesView)> = None;
+    let mut alerts = AlertConfig::default();
+    let mut tracker = Tracker::new(store.folder().as_deref());
+    tracker.know(store.known_apps().unwrap_or_default());
+    let mut last_cap_check = Instant::now() - Duration::from_secs(3600);
     let mut names = HashMap::new();
     // Processes that could not be named since the last full refresh; asking again
     // for every event of a process that already exited would waste the tick.
@@ -557,6 +632,7 @@ fn run(
                 HistoryRequest {
                     filter: filter.clone(),
                     known: known.clone(),
+                    focus: focus.clone(),
                     revision: filter_revision,
                 },
                 &store,
@@ -610,6 +686,16 @@ fn run(
                 }
                 Command::ResolveHosts(addresses) => hosts.request(&addresses),
                 Command::Labels(found) => labels.extend(found),
+                Command::Alerts(config) => {
+                    alerts = config;
+                    last_cap_check = Instant::now() - Duration::from_secs(3600);
+                }
+                Command::FocusApp(app) => {
+                    if focus != app {
+                        focus = app;
+                        refresh = true;
+                    }
+                }
                 Command::RetryCapture => {
                     drop(etw);
                     etw = capture::EtwCapture::start();
@@ -875,6 +961,45 @@ fn run(
                 row.down = row.down.saturating_add(event.down);
                 row.up = row.up.saturating_add(event.up);
             }
+            if !stop {
+                for row in event_rows.values() {
+                    // A name Windows could not give is not worth an alert.
+                    if row.app.starts_with("Process ") {
+                        continue;
+                    }
+                    let name = labels
+                        .get(&row.app)
+                        .filter(|name| !name.trim().is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| crate::traffic::executable_filename(&row.app));
+                    if let Some(found) = tracker.app_seen(&row.app, &name, &alerts) {
+                        announce(&shared, &ctx, found);
+                    }
+                }
+                if let Some(cap) = alerts.cap_bytes
+                    && last_cap_check.elapsed() >= Duration::from_secs(60)
+                {
+                    last_cap_check = Instant::now();
+                    let started =
+                        crate::alerts::cycle_start(chrono::Local::now(), alerts.reset_day);
+                    if let Ok(used) = store.adapter_usage(started, now, &known) {
+                        if let Ok(mut state) = shared.lock() {
+                            state.cap = Some(CapStatus {
+                                used,
+                                limit: cap,
+                                cycle_start: started,
+                            });
+                        }
+                        if let Some(found) = tracker.cap_checked(started, used, cap) {
+                            announce(&shared, &ctx, found);
+                        }
+                    }
+                } else if alerts.cap_bytes.is_none()
+                    && let Ok(mut state) = shared.lock()
+                {
+                    state.cap = None;
+                }
+            }
             if !storage_failed {
                 pending
                     .entry(now / 60 * 60)
@@ -945,6 +1070,7 @@ fn run(
                         HistoryRequest {
                             filter: filter.clone(),
                             known: known.clone(),
+                            focus: focus.clone(),
                             revision: filter_revision,
                         },
                         &store,
@@ -987,6 +1113,7 @@ mod tests {
         let request = |revision| HistoryRequest {
             filter: Filter::default(),
             known: HashSet::from(["visible".into()]),
+            focus: None,
             revision,
         };
         assert!(
@@ -1003,6 +1130,28 @@ mod tests {
             assert_eq!(state.history_revision, 7);
             assert_eq!(state.history_generation, 1);
         }
+        // Asking for an app's timeline publishes it, and clearing the focus removes it.
+        let focused = HistoryRequest {
+            focus: Some(("a.exe".into(), SeriesView::Period)),
+            ..request(8)
+        };
+        assert!(reader.request(focused, &store, &shared).is_none());
+        assert!(matches!(
+            incoming.recv_timeout(Duration::from_secs(5))?,
+            Command::Labels(_)
+        ));
+        {
+            let state = shared.lock().unwrap();
+            let series = state.app_series.as_deref().expect("series published");
+            assert_eq!((series.app.as_str(), series.revision), ("a.exe", 8));
+            assert_eq!(state.series_generation, 1);
+        }
+        assert!(reader.request(request(8), &store, &shared).is_none());
+        assert!(matches!(
+            incoming.recv_timeout(Duration::from_secs(5))?,
+            Command::Labels(_)
+        ));
+        assert!(shared.lock().unwrap().app_series.is_none());
         let started = Instant::now();
         drop(reader);
         assert!(started.elapsed() < Duration::from_secs(2));

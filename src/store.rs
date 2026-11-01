@@ -1,6 +1,6 @@
 use crate::model::{
-    Adapter, AppUsage, Filter, History, LiveTick, Point, ScopeTotals, TransportSummary, UsageRow,
-    WIFI_UNKNOWN, WifiNetwork,
+    Adapter, AppSeries, AppUsage, Filter, History, LiveTick, Point, ScopeTotals, SeriesView,
+    TransportSummary, UsageRow, WIFI_UNKNOWN, WifiNetwork,
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -163,6 +163,48 @@ impl Store {
     pub fn integrity_check(&self) -> Result<()> {
         db_integrity(&self.db)
     }
+    /// Every app that has ever been recorded as using the network.
+    pub fn known_apps(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT DISTINCT app FROM traffic WHERE source='transport'")?;
+        Ok(stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    /// Bytes carried by `adapters` between two times: what the Overall total counts.
+    pub fn adapter_usage(
+        &self,
+        start: i64,
+        end: i64,
+        adapters: &std::collections::HashSet<String>,
+    ) -> Result<u64> {
+        let mut stmt = self.db.prepare_cached(
+            "SELECT adapter_id,SUM(down),SUM(up) FROM traffic
+            WHERE source='adapter' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id",
+        )?;
+        let mut total = 0u64;
+        for row in stmt.query_map(params![start / 60 * 60, end], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, u64>(2)?,
+            ))
+        })? {
+            let (adapter, down, up) = row?;
+            if adapters.contains(&adapter) {
+                total = total.saturating_add(down).saturating_add(up);
+            }
+        }
+        Ok(total)
+    }
+    /// The folder holding the database file, if it has one.
+    pub fn folder(&self) -> Option<std::path::PathBuf> {
+        self.db
+            .path()
+            .filter(|path| !path.is_empty())
+            .and_then(|path| Path::new(path).parent().map(Path::to_path_buf))
+    }
     /// A second, read-only connection to the same database file for a background
     /// reader. WAL lets it read while the collector keeps writing. `None` for
     /// databases that have no file (in-memory), which cannot be shared.
@@ -232,6 +274,70 @@ impl Store {
                 ))
             })?;
         Ok(())
+    }
+    /// One app's transport traffic over the period of `filter`, honouring its adapter,
+    /// Wi-Fi network and destination-scope choices but not its text search.
+    pub fn app_series(
+        &self,
+        filter: &Filter,
+        app: &str,
+        now: i64,
+        view: SeriesView,
+    ) -> Result<AppSeries> {
+        let (mut start, end) = view.window(now).unwrap_or_else(|| filter.time_bounds(now));
+        if view == SeriesView::Period && filter.all_time() {
+            start = self
+                .db
+                .query_row(
+                    "SELECT MIN(minute) FROM traffic WHERE source='transport' AND app=?1 AND minute<=?2",
+                    params![app, end],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?
+                .unwrap_or(end.saturating_sub(3600));
+        }
+        let start = start / 60 * 60;
+        // Long periods are read an hour at a time, which keeps the answer small.
+        let step: i64 = if end.saturating_sub(start) > 2 * 86_400 {
+            3600
+        } else {
+            60
+        };
+        let mut stmt = self.db.prepare_cached(
+            "SELECT minute/?1*?1,adapter_id,scope,wifi_network,SUM(down),SUM(up)
+            FROM traffic WHERE source='transport' AND minute>=?2 AND minute<=?3 AND app=?4
+            GROUP BY minute/?1*?1,adapter_id,scope,wifi_network ORDER BY 1",
+        )?;
+        let mut points = std::collections::BTreeMap::<i64, (u64, u64)>::new();
+        let rows = stmt.query_map(params![step, start, end, app], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, u64>(4)?,
+                r.get::<_, u64>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (at, adapter, scope, wifi, down, up) = row?;
+            let wanted = (filter.adapters.is_empty() || filter.adapters.contains(&adapter))
+                && filter.wifi_network.as_ref().is_none_or(|id| id == &wifi)
+                && (filter.scope == crate::model::Scope::All || filter.scope.key() == scope);
+            if wanted {
+                let point = points.entry(at).or_default();
+                point.0 = point.0.saturating_add(down);
+                point.1 = point.1.saturating_add(up);
+            }
+        }
+        Ok(AppSeries {
+            app: app.to_owned(),
+            view,
+            read_at: now,
+            revision: 0,
+            step,
+            window: (start, end),
+            points: points.into_iter().map(|(at, (d, u))| (at, d, u)).collect(),
+        })
     }
     pub fn history(&self, filter: &Filter, now: i64) -> Result<History> {
         let (mut window_start, window_end) = filter.time_bounds(now);
@@ -1757,6 +1863,196 @@ mod layout_tests {
             .db
             .query_row("PRAGMA journal_size_limit", [], |r| r.get(0))?;
         assert_eq!(limit, 67_108_864);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod app_series_tests {
+    use super::*;
+    use crate::model::Scope;
+
+    fn row(app: &str, adapter: &str, scope: &str, down: u64) -> UsageRow {
+        UsageRow {
+            source: "transport".into(),
+            adapter_id: adapter.into(),
+            adapter: adapter.into(),
+            app: app.into(),
+            pid: 1,
+            remote: "1.1.1.1".into(),
+            protocol: "TCP".into(),
+            scope: scope.into(),
+            down,
+            up: down / 10,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn one_apps_series_follows_the_adapter_and_scope_choices_but_not_other_apps() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        store.write(
+            600,
+            &[
+                row("a.exe", "eth", "WAN", 100),
+                row("a.exe", "wifi", "WAN", 40),
+                row("b.exe", "eth", "WAN", 999),
+            ],
+        )?;
+        store.write(660, &[row("a.exe", "eth", "LAN", 20)])?;
+        let now = 700;
+        let all = Filter {
+            source: crate::model::Source::Transport,
+            seconds: 3600,
+            ..Default::default()
+        };
+        let series = store.app_series(&all, "a.exe", now, SeriesView::Period)?;
+        assert_eq!(series.step, 60);
+        assert_eq!(series.points, vec![(600, 140, 14), (660, 20, 2)]);
+
+        let only_eth = Filter {
+            adapters: ["eth".to_owned()].into(),
+            scope: Scope::Wan,
+            ..all.clone()
+        };
+        assert_eq!(
+            store
+                .app_series(&only_eth, "a.exe", now, SeriesView::Period)?
+                .points,
+            vec![(600, 100, 10)]
+        );
+        assert!(
+            store
+                .app_series(&all, "missing.exe", now, SeriesView::Period)?
+                .points
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn long_periods_are_read_an_hour_at_a_time() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        store.write(3_600_000, &[row("a.exe", "eth", "WAN", 10)])?;
+        store.write(3_600_060, &[row("a.exe", "eth", "WAN", 5)])?;
+        let week = Filter {
+            source: crate::model::Source::Transport,
+            seconds: 7 * 86_400,
+            ..Default::default()
+        };
+        let series = store.app_series(&week, "a.exe", 3_610_000, SeriesView::Period)?;
+        assert_eq!(series.step, 3600);
+        assert_eq!(series.points, vec![(3_600_000, 15, 1)]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    fn adapter_row(adapter: &str, down: u64, up: u64) -> UsageRow {
+        UsageRow {
+            source: "adapter".into(),
+            adapter_id: adapter.into(),
+            down,
+            up,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn adapter_usage_counts_known_adapters_inside_the_period_only() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        store.write(
+            600,
+            &[adapter_row("eth", 100, 10), adapter_row("old-vpn", 999, 9)],
+        )?;
+        store.write(7200, &[adapter_row("eth", 50, 5)])?;
+        let known = ["eth".to_owned()].into();
+        assert_eq!(store.adapter_usage(0, 1000, &known)?, 110);
+        assert_eq!(store.adapter_usage(0, 8000, &known)?, 165);
+        assert_eq!(store.adapter_usage(660, 8000, &known)?, 55);
+        assert_eq!(store.adapter_usage(0, 8000, &Default::default())?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn known_apps_lists_each_recorded_app_once() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let app = |name: &str, minute: i64| {
+            (
+                minute,
+                UsageRow {
+                    source: "transport".into(),
+                    app: name.into(),
+                    adapter_id: "eth".into(),
+                    remote: "1.1.1.1".into(),
+                    ..Default::default()
+                },
+            )
+        };
+        for (minute, row) in [app("a.exe", 600), app("a.exe", 660), app("b.exe", 660)] {
+            store.write(minute, &[row])?;
+        }
+        store.write(600, &[adapter_row("eth", 1, 1)])?;
+        let apps = store.known_apps()?;
+        assert_eq!(
+            apps,
+            ["a.exe".to_owned(), "b.exe".to_owned()]
+                .into_iter()
+                .collect()
+        );
+        assert!(Store::open(Path::new(":memory:"))?.folder().is_none());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod series_view_store_tests {
+    use super::*;
+
+    #[test]
+    fn daily_and_monthly_views_read_beyond_a_five_minute_period() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let now = chrono::Utc::now().timestamp() / 60 * 60;
+        let row = |down| UsageRow {
+            source: "transport".into(),
+            adapter_id: "eth".into(),
+            adapter: "eth".into(),
+            app: "a.exe".into(),
+            pid: 1,
+            remote: "1.1.1.1".into(),
+            protocol: "TCP".into(),
+            scope: "WAN".into(),
+            down,
+            ..Default::default()
+        };
+        store.write(now - 3 * 86_400, &[row(30)])?;
+        store.write(now - 40 * 86_400, &[row(400)])?;
+        store.write(now, &[row(5)])?;
+        let short = Filter {
+            source: crate::model::Source::Transport,
+            seconds: 300,
+            ..Default::default()
+        };
+        let total = |view| -> Result<u64> {
+            Ok(store
+                .app_series(&short, "a.exe", now, view)?
+                .points
+                .iter()
+                .map(|point| point.1)
+                .sum())
+        };
+        assert_eq!(total(SeriesView::Period)?, 5, "Only the five minutes");
+        assert_eq!(total(SeriesView::Daily)?, 35, "The last 30 days");
+        assert_eq!(total(SeriesView::Monthly)?, 435, "The last 12 months");
+        assert_eq!(
+            store
+                .app_series(&short, "a.exe", now, SeriesView::Daily)?
+                .view,
+            SeriesView::Daily
+        );
         Ok(())
     }
 }

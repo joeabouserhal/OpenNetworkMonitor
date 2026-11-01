@@ -236,6 +236,56 @@ pub struct TransportSummary {
     pub classified: ScopeTotals,
     pub top_apps: Vec<AppUsage>,
 }
+/// How far back an app's timeline looks. Daily and monthly views have a span of their
+/// own, so they stay useful when the selected period is only minutes long.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SeriesView {
+    /// The period chosen at the top of the page.
+    #[default]
+    Period,
+    /// The last 30 calendar days, today included.
+    Daily,
+    /// The last 12 calendar months, this one included.
+    Monthly,
+}
+impl SeriesView {
+    pub const DAILY_DAYS: u64 = 30;
+    pub const MONTHLY_MONTHS: u32 = 12;
+    /// The `(start, end)` this view reads at `now`, or none to use the selected period.
+    pub fn window(self, now: i64) -> Option<(i64, i64)> {
+        Self::window_in(self, chrono::Local.timestamp_opt(now, 0).single()?)
+    }
+    fn window_in<T: TimeZone>(self, now: chrono::DateTime<T>) -> Option<(i64, i64)> {
+        let today = now.date_naive();
+        let first = match self {
+            Self::Period => return None,
+            Self::Daily => today.checked_sub_days(chrono::Days::new(Self::DAILY_DAYS - 1))?,
+            Self::Monthly => today
+                .with_day(1)?
+                .checked_sub_months(chrono::Months::new(Self::MONTHLY_MONTHS - 1))?,
+        };
+        let start = now
+            .timezone()
+            .from_local_datetime(&first.and_hms_opt(0, 0, 0)?)
+            .earliest()?;
+        Some((start.timestamp(), now.timestamp()))
+    }
+}
+/// One app's traffic over the selected period, in steps of `step` seconds (a minute for
+/// short periods, an hour for long ones). Steps without traffic are left out.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AppSeries {
+    pub app: String,
+    pub view: SeriesView,
+    /// When it was read, in seconds since the epoch.
+    pub read_at: i64,
+    /// The filter revision this was read for, so a stale answer is never shown.
+    pub revision: u64,
+    pub step: i64,
+    pub window: (i64, i64),
+    /// `(start, down, up)` per step, oldest first.
+    pub points: Vec<(i64, u64, u64)>,
+}
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScopeTotals {
     pub lan: u64,
@@ -552,6 +602,35 @@ mod calendar_period_tests {
         assert_eq!(
             restored.time_bounds(november.timestamp()),
             (month_start(local), november.timestamp())
+        );
+    }
+}
+
+#[cfg(test)]
+mod series_view_tests {
+    use super::*;
+
+    #[test]
+    fn daily_and_monthly_views_span_whole_calendar_periods_whatever_the_time() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 20, 15, 30, 0)
+            .unwrap();
+        let midnight = |y, m, d| {
+            chrono::Utc
+                .with_ymd_and_hms(y, m, d, 0, 0, 0)
+                .unwrap()
+                .timestamp()
+        };
+        assert_eq!(SeriesView::Period.window_in(now), None);
+        // 30 calendar days ending today: 22 Oct to 20 Nov.
+        assert_eq!(
+            SeriesView::Daily.window_in(now),
+            Some((midnight(2026, 10, 22), now.timestamp()))
+        );
+        // 12 calendar months ending this one: December 2025 to November 2026.
+        assert_eq!(
+            SeriesView::Monthly.window_in(now),
+            Some((midnight(2025, 12, 1), now.timestamp()))
         );
     }
 }

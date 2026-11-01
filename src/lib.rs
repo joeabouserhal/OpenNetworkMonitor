@@ -1,3 +1,4 @@
+pub mod alerts;
 pub mod app;
 mod app_icon;
 pub mod capture;
@@ -5,6 +6,7 @@ pub mod graph;
 pub mod hosts;
 pub mod icons;
 pub mod model;
+pub mod notify;
 pub mod startup;
 pub mod store;
 pub mod titlebar;

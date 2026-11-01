@@ -51,10 +51,19 @@ impl MonitorApp {
             history_totals: Default::default(),
             dialogs: Default::default(),
             connection_cache: Default::default(),
+            connection_sort: None,
+            protocol_filter: Default::default(),
+            status_filter: Default::default(),
+            pending_end: None,
+            timeline_mode: Default::default(),
+            focus_sent: None,
+            alerts_sent: Default::default(),
+            cap_input: "100".into(),
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
             host_request: None,
             titlebar: None,
+            applied_theme: Theme::Dark,
             window_record: None,
         };
         if page == "apps" {
@@ -354,6 +363,15 @@ mod render_tests {
         for (name, page, light, size, steps) in [
             ("apps", "apps", false, [1200.0, 820.0], vec![]),
             ("apps-small", "apps", false, [960.0, 680.0], vec![]),
+            ("apps-timeline", "apps", false, [1200.0, 820.0], vec![]),
+            ("apps-timeline-small", "apps", true, [960.0, 680.0], vec![]),
+            (
+                "apps-timeline-daily",
+                "apps",
+                false,
+                [1200.0, 820.0],
+                vec![],
+            ),
             ("adapter-small", "overview", false, [960.0, 680.0], vec![]),
             ("overall-other", "overview", false, [960.0, 680.0], vec![]),
             ("overall-smooth", "overview", false, wide, vec![]),
@@ -362,6 +380,13 @@ mod render_tests {
             ("connections", "connections", false, [1200.0, 820.0], vec![]),
             ("adapters", "adapters", false, [960.0, 680.0], vec![]),
             ("settings", "settings", false, [1200.0, 820.0], vec![]),
+            (
+                "settings-alerts",
+                "settings",
+                true,
+                [1200.0, 1400.0],
+                vec![],
+            ),
             ("apps-light", "apps", true, [1200.0, 820.0], vec![]),
             ("overall-light", "overview", true, wide, vec![]),
             ("period-dates", "overview", false, [960.0, 680.0], vec![]),
@@ -425,6 +450,43 @@ mod render_tests {
         ] {
             let ctx = egui::Context::default();
             let mut app = MonitorApp::preview(&ctx, page, light);
+            if name == "settings-alerts" {
+                app.settings.cap_enabled = true;
+                app.settings.alert_new_apps = true;
+                app.settings.cap_reset_day = 12;
+                app.data.cap = Some(crate::worker::CapStatus {
+                    used: 86 * 1_073_741_824,
+                    limit: 100 * 1_073_741_824,
+                    cycle_start: chrono::Utc::now().timestamp() - 20 * 86_400,
+                });
+            }
+            if name.starts_with("apps-timeline") {
+                let now = chrono::Utc::now().timestamp() / 60 * 60;
+                let daily = name.ends_with("daily");
+                app.selected_app = Some(PREVIEW_PATHS[1].to_owned());
+                let (view, step, span) = if daily {
+                    app.timeline_mode = super::app_timeline::TimelineMode::Daily;
+                    (crate::model::SeriesView::Daily, 3600, 30 * 86_400)
+                } else {
+                    (crate::model::SeriesView::Period, 300, 86_400)
+                };
+                let count = span / step;
+                app.data.app_series = Some(Arc::new(crate::model::AppSeries {
+                    app: PREVIEW_PATHS[1].to_owned(),
+                    view,
+                    read_at: 0,
+                    revision: app.filter_revision,
+                    step,
+                    window: (now - span, now),
+                    points: (0..count)
+                        .filter(|i| i % 7 != 3)
+                        .map(|i| {
+                            let wave = ((i as f64 / 14.0).sin().abs() * 9_000_000.0) as u64;
+                            (now - span + i * step, wave + 400_000, wave / 6 + 50_000)
+                        })
+                        .collect(),
+                }));
+            }
             if name.starts_with("period-") || name == "calendar" {
                 let filter = Filter {
                     seconds: 86400,

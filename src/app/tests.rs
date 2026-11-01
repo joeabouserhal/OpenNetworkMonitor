@@ -52,10 +52,19 @@ fn fixture() -> MonitorApp {
         history_totals: Default::default(),
         dialogs: Default::default(),
         connection_cache: Default::default(),
+        connection_sort: None,
+        protocol_filter: Default::default(),
+        status_filter: Default::default(),
+        pending_end: None,
+        timeline_mode: Default::default(),
+        focus_sent: None,
+        alerts_sent: Default::default(),
+        cap_input: String::new(),
         breakdown_cache: Arc::default(),
         breakdown_cache_key: None,
         host_request: None,
         titlebar: None,
+        applied_theme: Theme::Dark,
         window_record: None,
     }
 }
@@ -1459,4 +1468,58 @@ fn a_minimized_window_never_overwrites_the_last_real_size_and_position() {
         storage.get_string("settings").is_some(),
         "Settings still save"
     );
+}
+
+#[test]
+fn control_number_keys_switch_pages_and_escape_clears_the_selection() {
+    use egui::{Event, Key, Modifiers};
+    let ctx = context(Theme::Dark);
+    let size = Vec2::new(900.0, 600.0);
+    let press = |key: Key, modifiers: Modifiers| {
+        vec![Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }]
+    };
+    let mut app = app_fixture();
+    let send = |app: &mut MonitorApp, key, modifiers| {
+        ctx.run_ui(screen(size, press(key, modifiers)), |root| {
+            app.shortcuts(root.ctx())
+        })
+        .textures_delta
+        .clear();
+    };
+    app.selected_app = Some("C:/Apps/x.exe".into());
+    send(&mut app, Key::Num2, Modifiers::COMMAND);
+    assert!(app.page == Page::Connections);
+    assert!(
+        app.selected_app.is_none(),
+        "Changing page clears the selection"
+    );
+    send(&mut app, Key::Num4, Modifiers::COMMAND);
+    assert!(app.page == Page::Settings);
+    send(&mut app, Key::Num1, Modifiers::COMMAND);
+    assert!(app.page == Page::Overview);
+    send(&mut app, Key::Num3, Modifiers::NONE);
+    assert!(app.page == Page::Overview, "A bare digit is not a shortcut");
+
+    app.selected_app = Some("C:/Apps/x.exe".into());
+    send(&mut app, Key::Escape, Modifiers::NONE);
+    assert!(app.selected_app.is_none());
+}
+
+#[test]
+fn saved_settings_from_before_system_theme_keep_their_palette() {
+    // Settings saved by an earlier release have no `follow_system` field.
+    let old = serde_json::json!({ "theme": "Nord", "close_to_tray": true, "bits": false, "ui_scale": 0.9 });
+    let settings: Settings = serde_json::from_value(old).unwrap();
+    assert_eq!(settings.theme, Theme::Nord);
+    assert!(
+        !settings.follow_system,
+        "An existing choice is not overridden"
+    );
+    assert!(Settings::default().theme == Theme::Dark && !Settings::default().follow_system);
 }

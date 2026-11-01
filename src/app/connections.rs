@@ -1,6 +1,17 @@
+use super::connection_tools::{
+    self, Column, ProtocolFilter, Sort, StatusFilter, describe, endpoint_ip,
+};
 use super::*;
-use eframe::egui::{Align2, Margin, Pos2, Rect, Sense};
+use eframe::egui::{Align2, Margin, PopupCloseBehavior, Pos2, Rect, Sense, Shape, Stroke};
 use widgets::{bold, mono, paint_text, pal, radius, sans};
+
+/// What a row's context menu asked for, carried out once the list has been drawn.
+enum RowAction {
+    Copy(String),
+    Reveal(String),
+    EndProcess(u32, String),
+    SearchApp(String),
+}
 
 const CONNECTION_ROW_HEIGHT: f32 = 52.0;
 
@@ -20,19 +31,105 @@ pub(super) fn connection_columns(rect: Rect) -> [Rect; 6] {
 }
 
 impl MonitorApp {
+    fn apply_row_action(&mut self, ctx: &egui::Context, action: Option<RowAction>) {
+        match action {
+            Some(RowAction::Copy(text)) => ctx.copy_text(text),
+            Some(RowAction::Reveal(path)) => {
+                if !connection_tools::reveal_in_explorer(&path) {
+                    self.set_notice("That file location is not available.");
+                }
+            }
+            Some(RowAction::EndProcess(pid, name)) => self.pending_end = Some((pid, name)),
+            Some(RowAction::SearchApp(name)) => self.connection_search = name,
+            None => {}
+        }
+    }
+    /// Asks before ending a process; the app that owns it may lose unsaved work.
+    fn end_process_dialog(&mut self, ctx: &egui::Context) {
+        let Some((pid, name)) = self.pending_end.clone() else {
+            return;
+        };
+        let mut decision = None;
+        let response = egui::Modal::new(egui::Id::new("end-process-dialog"))
+            .area(egui::Modal::default_area(egui::Id::new("end-process-dialog")).fade_in(false))
+            .frame(
+                egui::Frame::window(&ctx.global_style())
+                    .inner_margin(24)
+                    .corner_radius(18),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(widgets::strong_text("End this process?", 20.0));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{name} (PID {pid}) will be stopped immediately. Anything it has not saved is lost."
+                    ))
+                    .size(14.0)
+                    .weak(),
+                );
+                ui.add_space(14.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::button_with(
+                        ui,
+                        widgets::ButtonKind::Primary,
+                        None,
+                        "End process",
+                        Some(130.0),
+                    )
+                    .clicked()
+                    {
+                        decision = Some(true);
+                    }
+                    if widgets::button_with(
+                        ui,
+                        widgets::ButtonKind::Ghost,
+                        None,
+                        "Cancel",
+                        Some(90.0),
+                    )
+                    .clicked()
+                    {
+                        decision = Some(false);
+                    }
+                });
+            });
+        if response.should_close() {
+            decision.get_or_insert(false);
+        }
+        match decision {
+            Some(true) => {
+                self.pending_end = None;
+                match connection_tools::end_process(pid) {
+                    Ok(()) => self.set_notice(&format!("Ended {name} (PID {pid}).")),
+                    Err(error) => self.set_notice(&error),
+                }
+            }
+            Some(false) => self.pending_end = None,
+            None => {}
+        }
+    }
     /// Connections matching the search, as positions in the snapshot with their display
     /// names. Rebuilt when a new snapshot or a different search arrives, not on every
     /// frame, since the text search formats and lowercases a string per connection.
     fn visible_connections(&mut self) -> Arc<Vec<(usize, String)>> {
-        let key = (self.data.revision, self.connection_search.clone());
+        let key = (
+            self.data.revision,
+            self.connection_search.clone(),
+            self.connection_sort,
+            self.protocol_filter,
+            self.status_filter,
+        );
         if self.connection_cache.key.as_ref() != Some(&key) {
             let search = self.connection_search.to_lowercase();
-            let rows: Vec<_> = self
-                .data
-                .snapshot
-                .connections
+            let connections = &self.data.snapshot.connections;
+            let mut rows: Vec<_> = connections
                 .iter()
                 .enumerate()
+                .filter(|(_, c)| {
+                    self.protocol_filter.matches(&c.protocol)
+                        && self.status_filter.matches(&c.state)
+                })
                 .filter_map(|(index, c)| {
                     let name = self.label(&c.app);
                     (search.is_empty()
@@ -45,6 +142,20 @@ impl MonitorApp {
                     .then_some((index, name))
                 })
                 .collect();
+            if let Some(sort) = self.connection_sort {
+                rows.sort_by(|(a, name_a), (b, name_b)| {
+                    let order = connection_tools::compare(
+                        sort.column,
+                        (&connections[*a], name_a),
+                        (&connections[*b], name_b),
+                    );
+                    if sort.ascending {
+                        order
+                    } else {
+                        order.reverse()
+                    }
+                });
+            }
             self.connection_cache = ConnectionCache {
                 key: Some(key),
                 rows: Arc::new(rows),
@@ -59,12 +170,46 @@ impl MonitorApp {
         let rows = self.visible_connections();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            let width = (ui.available_width() - 100.0).clamp(180.0, 520.0);
+            let width = (ui.available_width() - 520.0).clamp(180.0, 420.0);
             widgets::search_field(
                 ui,
                 &mut self.connection_search,
                 "Search apps, addresses, countries or status",
                 width,
+            );
+            widgets::dropdown(
+                ui,
+                "connection-protocol",
+                "Protocol",
+                self.protocol_filter.label(),
+                PopupCloseBehavior::CloseOnClick,
+                160.0,
+                |ui| {
+                    for choice in ProtocolFilter::ALL {
+                        if widgets::menu_item(ui, self.protocol_filter == choice, choice.label())
+                            .clicked()
+                        {
+                            self.protocol_filter = choice;
+                        }
+                    }
+                },
+            );
+            widgets::dropdown(
+                ui,
+                "connection-status",
+                "Status",
+                self.status_filter.label(),
+                PopupCloseBehavior::CloseOnClick,
+                180.0,
+                |ui| {
+                    for choice in StatusFilter::ALL {
+                        if widgets::menu_item(ui, self.status_filter == choice, choice.label())
+                            .clicked()
+                        {
+                            self.status_filter = choice;
+                        }
+                    }
+                },
             );
             ui.label(
                 RichText::new(format!("{} of {}", rows.len(), snapshot.connections.len()))
@@ -80,27 +225,66 @@ impl MonitorApp {
             top: 10,
             bottom: 8,
         });
+        let mut action: Option<RowAction> = None;
+        let mut visible_hosts: Vec<String> = Vec::new();
         ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
             widgets::surface_fill(ui, frame, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let (header, _) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
-                for (rect, title) in connection_columns(header).into_iter().zip([
-                    "Application",
-                    "Protocol",
-                    "Remote endpoint",
-                    "Local endpoint",
-                    "Country",
-                    "Status",
-                ]) {
+                for (rect, column) in connection_columns(header).into_iter().zip(Column::ALL) {
+                    let title = column.title();
+                    let click = ui.interact(
+                        rect,
+                        ui.id().with(("connection-sort", title)),
+                        Sense::click(),
+                    );
+                    click.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            format!("Sort by {title}"),
+                        )
+                    });
+                    let sorted = self.connection_sort.filter(|sort| sort.column == column);
                     paint_text(
                         ui.painter(),
                         rect,
                         Align2::LEFT_CENTER,
                         title,
                         bold(12.5),
-                        p.dim,
+                        if sorted.is_some() || click.hovered() {
+                            p.text
+                        } else {
+                            p.dim
+                        },
                     );
+                    if let Some(sort) = sorted {
+                        let x = rect.left() + widgets::text_width(ui.painter(), title, bold(12.5)) + 10.0;
+                        let y = rect.center().y;
+                        let points = if sort.ascending {
+                            vec![
+                                Pos2::new(x - 4.0, y + 2.5),
+                                Pos2::new(x + 4.0, y + 2.5),
+                                Pos2::new(x, y - 3.0),
+                            ]
+                        } else {
+                            vec![
+                                Pos2::new(x - 4.0, y - 2.5),
+                                Pos2::new(x + 4.0, y - 2.5),
+                                Pos2::new(x, y + 3.0),
+                            ]
+                        };
+                        ui.painter()
+                            .add(Shape::convex_polygon(points, p.text, Stroke::NONE));
+                    }
+                    if click
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("Sort by {}", title.to_lowercase()))
+                        .clicked()
+                    {
+                        self.connection_sort = Sort::clicked(self.connection_sort, column);
+                    }
                 }
                 widgets::divider(ui);
                 egui::ScrollArea::vertical()
@@ -113,7 +297,7 @@ impl MonitorApp {
                             let icon = self.icons.texture(ui.ctx(), &c.app);
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), CONNECTION_ROW_HEIGHT),
-                                Sense::hover(),
+                                Sense::click(),
                             );
                             let cells = connection_columns(rect);
                             let painter = ui.painter();
@@ -178,19 +362,50 @@ impl MonitorApp {
                                 bold(12.0),
                                 p.dim,
                             );
+                            let remote_ip = endpoint_ip(&c.remote);
+                            let host = remote_ip
+                                .and_then(|ip| snapshot.host_labels.get(&ip.to_string()))
+                                .filter(|host| !host.is_empty());
+                            if let Some(ip) = remote_ip
+                                && host.is_none()
+                                && classify(ip, &[]) == Scope::Wan
+                            {
+                                visible_hosts.push(ip.to_string());
+                            }
                             for (i, value) in [(2, c.remote.as_str()), (3, c.local.as_str())] {
                                 let value = if value.is_empty() { "—" } else { value };
+                                // A resolved name gets a second line under the address.
+                                let (top, bottom) = if i == 2 && host.is_some() {
+                                    (mid - 17.0, mid + 1.0)
+                                } else {
+                                    (mid - 10.0, mid + 10.0)
+                                };
                                 paint_text(
                                     painter,
                                     Rect::from_min_max(
-                                        Pos2::new(cells[i].left(), mid - 10.0),
-                                        Pos2::new(cells[i].right(), mid + 10.0),
+                                        Pos2::new(cells[i].left(), top),
+                                        Pos2::new(cells[i].right(), bottom),
                                     ),
                                     Align2::LEFT_CENTER,
                                     value,
                                     mono(12.5),
                                     if i == 2 { p.text } else { p.dim },
                                 );
+                                if i == 2
+                                    && let Some(host) = host
+                                {
+                                    paint_text(
+                                        painter,
+                                        Rect::from_min_max(
+                                            Pos2::new(cells[i].left(), mid + 2.0),
+                                            Pos2::new(cells[i].right(), mid + 19.0),
+                                        ),
+                                        Align2::LEFT_CENTER,
+                                        host,
+                                        sans(12.0),
+                                        p.dim,
+                                    );
+                                }
                             }
                             let country = if c.country.is_empty() {
                                 "—"
@@ -234,10 +449,47 @@ impl MonitorApp {
                                 sans(13.0),
                                 if established { p.text } else { p.dim },
                             );
-                            response.on_hover_text(format!(
-                                "{name}\n{}\nPID {} · {}\nRemote: {}\nLocal: {}\n{} · {}",
-                                c.app, c.pid, c.protocol, c.remote, c.local, c.country, c.state
+                            let response = response.on_hover_text(format!(
+                                "{name}\n{}\nPID {} · {}\nRemote: {}{}\nLocal: {}\n{} · {}\nRight-click for actions",
+                                c.app,
+                                c.pid,
+                                c.protocol,
+                                c.remote,
+                                host.map(|host| format!(" ({host})")).unwrap_or_default(),
+                                c.local,
+                                c.country,
+                                c.state
                             ));
+                            response.context_menu(|ui| {
+                                ui.set_width(236.0);
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                let pick = |ui: &mut egui::Ui, label: &str| {
+                                    let clicked = widgets::menu_item(ui, false, label).clicked();
+                                    if clicked {
+                                        ui.close();
+                                    }
+                                    clicked
+                                };
+                                if pick(ui, "Copy remote address") {
+                                    action = Some(RowAction::Copy(c.remote.clone()));
+                                }
+                                if pick(ui, "Copy local address") {
+                                    action = Some(RowAction::Copy(c.local.clone()));
+                                }
+                                if pick(ui, "Copy connection details") {
+                                    action = Some(RowAction::Copy(describe(name, c)));
+                                }
+                                widgets::divider(ui);
+                                if pick(ui, "Show only this app") {
+                                    action = Some(RowAction::SearchApp(name.clone()));
+                                }
+                                if pick(ui, "Open file location") {
+                                    action = Some(RowAction::Reveal(c.app.clone()));
+                                }
+                                if pick(ui, "End process…") {
+                                    action = Some(RowAction::EndProcess(c.pid, name.clone()));
+                                }
+                            });
                         }
                         if rows.is_empty() {
                             widgets::empty_state(ui, "No connections match your search.");
@@ -245,6 +497,18 @@ impl MonitorApp {
                     });
             });
         });
+        self.apply_row_action(ui.ctx(), action);
+        self.end_process_dialog(ui.ctx());
+        if !visible_hosts.is_empty()
+            && self
+                .host_request
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+        {
+            visible_hosts.sort();
+            visible_hosts.dedup();
+            let _ = self.worker.tx.send(Command::ResolveHosts(visible_hosts));
+            self.host_request = Some(Instant::now());
+        }
         ui.add_space(8.0);
         ui.label(
             RichText::new(

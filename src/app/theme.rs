@@ -21,6 +21,15 @@ impl Theme {
             Self::Mocha => "Catppuccin Mocha",
         }
     }
+    /// The theme to show: with "match Windows" on, Light or Slate to follow the system's
+    /// choice, otherwise the one picked. An unknown system theme keeps the pick.
+    pub(super) fn resolve(follow_system: bool, system: Option<egui::Theme>, chosen: Self) -> Self {
+        match (follow_system, system) {
+            (true, Some(egui::Theme::Light)) => Self::Light,
+            (true, Some(egui::Theme::Dark)) => Self::Dark,
+            _ => chosen,
+        }
+    }
     pub(super) fn apply(self, ctx: &egui::Context) {
         self.palette().install(ctx);
     }
@@ -108,5 +117,21 @@ impl Theme {
                 bad: rgb(243, 139, 168),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn following_windows_picks_slate_or_light_and_otherwise_keeps_the_choice() {
+        let dark = Some(egui::Theme::Dark);
+        let light = Some(egui::Theme::Light);
+        assert_eq!(Theme::resolve(true, dark, Theme::Nord), Theme::Dark);
+        assert_eq!(Theme::resolve(true, light, Theme::Mocha), Theme::Light);
+        assert_eq!(Theme::resolve(true, None, Theme::Nord), Theme::Nord);
+        assert_eq!(Theme::resolve(false, light, Theme::Nord), Theme::Nord);
+        assert_eq!(Theme::resolve(false, dark, Theme::Light), Theme::Light);
     }
 }
