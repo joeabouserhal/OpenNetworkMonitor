@@ -2,15 +2,12 @@ use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicIsize, Ordering},
     },
     time::Duration,
 };
-use tray_icon::{
-    MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-};
+use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{IsWindow, PostMessageW, WM_MOUSEMOVE},
@@ -23,6 +20,9 @@ pub struct Tray {
     pub paused: Arc<AtomicBool>,
     /// Set by the menu; the window takes it, goes to Settings and clears it.
     pub open_settings: Arc<AtomicBool>,
+    /// Where on the screen, in physical pixels, the icon was right-clicked. The window
+    /// takes it and shows its own menu there.
+    menu_at: Arc<Mutex<Option<(f64, f64)>>>,
     last_tooltip: std::cell::RefCell<String>,
 }
 pub fn icon_pixels() -> Vec<u8> {
@@ -31,68 +31,57 @@ pub fn icon_pixels() -> Vec<u8> {
 
 impl Tray {
     pub fn new(ctx: egui::Context) -> anyhow::Result<Self> {
-        let menu = Menu::new();
-        let show = MenuItem::new("Open OpenNetworkMonitor", true, None);
-        let settings = MenuItem::new("Open Settings", true, None);
-        let pause = CheckMenuItem::new("Pause recording", true, false, None);
-        let exit_item = MenuItem::new("Exit", true, None);
-        menu.append(&show)?;
-        menu.append(&settings)?;
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&pause)?;
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&exit_item)?;
         let exit = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let open_settings = Arc::new(AtomicBool::new(false));
-        let flag = exit.clone();
-        let (paused_flag, settings_flag) = (paused.clone(), open_settings.clone());
-        let wake = ctx.clone();
-        let show_id = show.id().clone();
-        let settings_id = settings.id().clone();
-        let pause_id = pause.id().clone();
-        let exit_id = exit_item.id().clone();
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            if event.id == exit_id {
-                request_exit(&wake, &flag);
-            } else if event.id == show_id {
-                show_window(&wake, &flag);
-            } else if event.id == settings_id {
-                settings_flag.store(true, Ordering::Release);
-                show_window(&wake, &flag);
-            } else if event.id == pause_id {
-                // The item ticks itself when clicked; this follows it.
-                paused_flag.fetch_xor(true, Ordering::AcqRel);
-            }
-            wake.request_repaint();
-        }));
-        let icon_exit = exit.clone();
-        TrayIconEvent::set_event_handler(Some(move |event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
+        let menu_at = Arc::new(Mutex::new(None));
+        let (icon_exit, icon_menu) = (exit.clone(), menu_at.clone());
+        TrayIconEvent::set_event_handler(Some(move |event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => show_window(&ctx, &icon_exit),
+            // The menu is drawn by the app itself, so the click only says where.
+            TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Up,
+                position,
+                ..
+            } => {
+                if let Ok(mut at) = icon_menu.lock() {
+                    *at = Some((position.x, position.y));
                 }
-            ) {
-                show_window(&ctx, &icon_exit);
+                ctx.request_repaint();
             }
+            _ => {}
         }));
         let icon = tray_icon::Icon::from_rgba(icon_pixels(), 32, 32)?;
         let tray = TrayIconBuilder::new()
             .with_icon(icon)
             .with_tooltip("OpenNetworkMonitor · monitoring in background")
-            .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
             .build()?;
         Ok(Self {
             icon: tray,
             exit,
             paused,
             open_settings,
+            menu_at,
             last_tooltip: std::cell::RefCell::new(String::new()),
         })
+    }
+    /// Where the icon was right-clicked since this was last called.
+    pub fn take_menu_request(&self) -> Option<(f64, f64)> {
+        self.menu_at.lock().ok().and_then(|mut at| at.take())
+    }
+    /// Brings the main window forward, as a left click on the icon does.
+    pub fn open(&self, ctx: &egui::Context) {
+        show_window(ctx, &self.exit);
+    }
+    /// Saves and exits, as the menu's Exit does.
+    pub fn quit(&self, ctx: &egui::Context) {
+        request_exit(ctx, &self.exit);
+        ctx.request_repaint();
     }
     /// Shows `text` when the pointer rests on the tray icon. Unchanged text is not
     /// sent to Windows again.

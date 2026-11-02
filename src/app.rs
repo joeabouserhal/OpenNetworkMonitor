@@ -203,6 +203,8 @@ pub struct MonitorApp {
     icons: IconCache,
     startup: crate::startup::Controller,
     tray: Option<Tray>,
+    /// The tray icon's own menu while it is open.
+    tray_menu: Option<pages::TrayMenu>,
     data: Shared,
     settings: Settings,
     page: Page,
@@ -315,6 +317,7 @@ impl MonitorApp {
             icons: IconCache::new(),
             startup: crate::startup::Controller::new(cc.egui_ctx.clone()),
             tray,
+            tray_menu: None,
             data: Shared::default(),
             settings,
             page: Page::Overview,
@@ -661,6 +664,9 @@ impl eframe::App for MonitorApp {
                 let _ = self.worker.tx.send(Command::Pause(paused));
                 self.pause_sent = paused;
             }
+            if let Some(at) = tray.take_menu_request() {
+                self.tray_menu = Some(pages::TrayMenu::new(at));
+            }
             if tray.open_settings.swap(false, Ordering::AcqRel) {
                 self.page = Page::Settings;
             }
@@ -713,6 +719,12 @@ impl eframe::App for MonitorApp {
         }
         self.shortcuts(root.ctx());
         self.draw(root);
+        let ctx = root.ctx().clone();
+        self.tray_menu_window(&ctx);
+    }
+    /// Fully clear, so the corners of the rounded tray menu window show what is behind them.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Remove the tray icon promptly while the worker saves its final data.

@@ -31,6 +31,7 @@ impl MonitorApp {
             icons: IconCache::disabled(),
             startup: crate::startup::Controller::preview(),
             tray: None,
+            tray_menu: None,
             data: Shared::default(),
             settings,
             page: match page {
