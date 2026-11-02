@@ -225,6 +225,12 @@ pub struct History {
     pub down: u64,
     pub up: u64,
 }
+/// An app and the last minute it was recorded using the network.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecentApp {
+    pub app: String,
+    pub last_seen: i64,
+}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppUsage {
     pub app: String,

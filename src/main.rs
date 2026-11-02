@@ -3,7 +3,7 @@
 compile_error!("OpenNetworkMonitor currently supports Windows only.");
 
 use anyhow::{Context, Result};
-use open_network_monitor::{app, capture, model, store, tray, widgets, window_state};
+use open_network_monitor::{app, capture, model, store, tray, window_state};
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
@@ -68,8 +68,8 @@ fn run() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("OpenNetworkMonitor")
             .with_visible(!startup)
-            .with_inner_size(widgets::DEFAULT_WINDOW_SIZE)
-            .with_min_inner_size(widgets::MIN_WINDOW_SIZE)
+            .with_inner_size(app::DEFAULT_WINDOW_SIZE)
+            .with_min_inner_size(app::MIN_WINDOW_SIZE)
             .with_clamp_size_to_monitor_size(true)
             .with_icon(icon),
         persistence_path: Some(data_dir.join("preferences.ron")),

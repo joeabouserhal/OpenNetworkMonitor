@@ -1,6 +1,6 @@
 use crate::model::{
-    Adapter, AppSeries, AppUsage, Filter, History, LiveTick, Point, ScopeTotals, SeriesView,
-    TransportSummary, UsageRow, WIFI_UNKNOWN, WifiNetwork,
+    Adapter, AppSeries, AppUsage, Filter, History, LiveTick, Point, RecentApp, ScopeTotals,
+    SeriesView, TransportSummary, UsageRow, WIFI_UNKNOWN, WifiNetwork,
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -162,6 +162,22 @@ impl Store {
     /// Scans the file for damage. Slow on a large history, so not part of `open`.
     pub fn integrity_check(&self) -> Result<()> {
         db_integrity(&self.db)
+    }
+    /// The apps most recently recorded using the network, newest first, whatever the
+    /// period or adapter filters say.
+    pub fn recent_apps(&self, limit: usize) -> Result<Vec<RecentApp>> {
+        let mut stmt = self.db.prepare_cached(
+            "SELECT app,MAX(minute) AS last FROM traffic WHERE source='transport' AND app<>''
+            GROUP BY app ORDER BY last DESC,app LIMIT ?1",
+        )?;
+        Ok(stmt
+            .query_map([limit as i64], |r| {
+                Ok(RecentApp {
+                    app: r.get(0)?,
+                    last_seen: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
     }
     /// Every app that has ever been recorded as using the network.
     pub fn known_apps(&self) -> Result<std::collections::HashSet<String>> {
@@ -2053,6 +2069,47 @@ mod series_view_store_tests {
                 .view,
             SeriesView::Daily
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recent_apps_tests {
+    use super::*;
+
+    #[test]
+    fn apps_come_back_newest_first_with_their_last_active_minute() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let row = |app: &str| UsageRow {
+            source: "transport".into(),
+            adapter_id: "eth".into(),
+            app: app.into(),
+            remote: "1.1.1.1".into(),
+            down: 1,
+            ..Default::default()
+        };
+        store.write(600, &[row("old.exe"), row("both.exe")])?;
+        store.write(1200, &[row("both.exe")])?;
+        store.write(1800, &[row("new.exe")])?;
+        store.write(
+            1900,
+            &[UsageRow {
+                source: "adapter".into(),
+                adapter_id: "eth".into(),
+                down: 5,
+                ..Default::default()
+            }],
+        )?;
+        let recent = store.recent_apps(10)?;
+        let names: Vec<_> = recent
+            .iter()
+            .map(|r| (r.app.as_str(), r.last_seen))
+            .collect();
+        assert_eq!(
+            names,
+            [("new.exe", 1800), ("both.exe", 1200), ("old.exe", 600)]
+        );
+        assert_eq!(store.recent_apps(2)?.len(), 2);
         Ok(())
     }
 }

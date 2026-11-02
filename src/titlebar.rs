@@ -5,7 +5,7 @@
 //! DWM. Windows 11 (build 22000 and later) honours the caption, text and border
 //! colours. Older versions ignore them and keep their standard bar, and
 //! `apply` reports that by returning false.
-use crate::widgets::Palette;
+use crate::ui::tokens::Tokens;
 use eframe::egui::Color32;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{mem::size_of, ptr};
@@ -30,14 +30,14 @@ pub struct Colors {
 impl Colors {
     /// The bar takes the canvas colour, so it reads as part of the window rather
     /// than a strip above it, and the border is a faint tint of the text colour.
-    pub fn from_palette(palette: &Palette) -> Self {
+    pub fn from_tokens(tokens: &Tokens) -> Self {
         let colorref =
             |c: Color32| u32::from(c.r()) | u32::from(c.g()) << 8 | u32::from(c.b()) << 16;
         Self {
-            caption: colorref(palette.canvas),
-            text: colorref(palette.text),
-            border: colorref(palette.canvas.lerp_to_gamma(palette.text, 0.12)),
-            dark: palette.dark,
+            caption: colorref(tokens.background),
+            text: colorref(tokens.foreground),
+            border: colorref(tokens.background.lerp_to_gamma(tokens.foreground, 0.12)),
+            dark: tokens.is_dark(),
         }
     }
 }
@@ -85,30 +85,17 @@ mod tests {
         UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW},
     };
 
-    fn palette() -> Palette {
-        Palette {
-            dark: true,
-            canvas: Color32::from_rgb(0x11, 0x22, 0x33),
-            card: Color32::BLACK,
-            raised: Color32::BLACK,
-            sunken: Color32::BLACK,
-            hairline: Color32::TRANSPARENT,
-            text: Color32::from_rgb(0xEE, 0xDD, 0xCC),
-            dim: Color32::GRAY,
-            accent: Color32::BLUE,
-            accent_ink: Color32::WHITE,
-            accent_soft: Color32::BLACK,
-            down: Color32::BLUE,
-            up: Color32::YELLOW,
-            good: Color32::GREEN,
-            warn: Color32::YELLOW,
-            bad: Color32::RED,
-        }
+    fn tokens() -> Tokens {
+        use crate::ui::tokens::{BaseColor, Scheme};
+        let mut tokens = Tokens::new(Scheme::Dark, BaseColor::Zinc);
+        tokens.background = Color32::from_rgb(0x11, 0x22, 0x33);
+        tokens.foreground = Color32::from_rgb(0xEE, 0xDD, 0xCC);
+        tokens
     }
 
     #[test]
-    fn colours_are_windows_colorrefs_taken_from_the_palette() {
-        let colors = Colors::from_palette(&palette());
+    fn colours_are_windows_colorrefs_taken_from_the_tokens() {
+        let colors = Colors::from_tokens(&tokens());
         // COLORREF stores blue in the high byte: 0x00BBGGRR.
         assert_eq!(colors.caption, 0x0033_2211);
         assert_eq!(colors.text, 0x00CC_DDEE);
@@ -141,7 +128,7 @@ mod tests {
             )
         };
         assert!(!hwnd.is_null(), "Could not create a test window");
-        let colors = Colors::from_palette(&palette());
+        let colors = Colors::from_tokens(&tokens());
         // Windows 11 accepts all four attributes; older versions refuse the colours, which
         // `set` reports rather than failing. DWM only lets the dark-mode flag be read back.
         if set(hwnd, colors) {

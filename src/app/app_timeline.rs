@@ -1,8 +1,6 @@
 //! One app's usage over the selected period, as stacked download/upload bars.
-use crate::model::{AppSeries, SeriesView, format_bytes};
-use crate::widgets::{self, paint_text, pal, radius, sans};
+use crate::model::{AppSeries, SeriesView};
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
-use eframe::egui::{self, Align2, Pos2, Rect, Sense, Vec2};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum TimelineMode {
@@ -160,123 +158,6 @@ fn calendar_bars(series: &AppSeries, start: i64, end: i64, monthly: bool) -> Vec
             up,
         })
         .collect()
-}
-
-/// Draws the bars into the width available. `height` includes the axis labels.
-pub(super) fn show(ui: &mut egui::Ui, bars: &[Bar], height: f32) {
-    let p = pal(ui);
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    let peak = bars
-        .iter()
-        .map(|bar| bar.down.saturating_add(bar.up))
-        .max()
-        .unwrap_or(0);
-    if peak == 0 {
-        paint_text(
-            ui.painter(),
-            rect,
-            Align2::CENTER_CENTER,
-            "No traffic from this app in this period",
-            sans(13.5),
-            p.dim,
-        );
-        return;
-    }
-    let axis = 20.0;
-    let chart = Rect::from_min_max(
-        Pos2::new(rect.left(), rect.top() + 16.0),
-        Pos2::new(rect.right(), rect.bottom() - axis),
-    );
-    let painter = ui.painter();
-    paint_text(
-        painter,
-        Rect::from_min_size(rect.min, Vec2::new(rect.width(), 14.0)),
-        Align2::LEFT_CENTER,
-        &format!("Peak {}", format_bytes(peak as f64)),
-        sans(12.0),
-        p.dim,
-    );
-    let ppp = ui.ctx().pixels_per_point();
-    painter.hline(
-        chart.x_range(),
-        ((chart.bottom() * ppp).round() + 0.5) / ppp,
-        widgets::hairline(ui),
-    );
-    let slot = chart.width() / bars.len() as f32;
-    let width = (slot * 0.72).clamp(1.0, 28.0);
-    let hovered = response
-        .hover_pos()
-        .filter(|pos| chart.expand2(Vec2::new(0.0, 16.0)).contains(*pos))
-        .map(|pos| (((pos.x - chart.left()) / slot) as usize).min(bars.len() - 1));
-    let scale = chart.height() / peak as f32;
-    for (index, bar) in bars.iter().enumerate() {
-        let centre = chart.left() + (index as f32 + 0.5) * slot;
-        if hovered == Some(index) {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(centre - slot / 2.0, chart.top()),
-                    Pos2::new(centre + slot / 2.0, chart.bottom()),
-                ),
-                radius(4.0),
-                p.raised,
-            );
-        }
-        let down = bar.down as f32 * scale;
-        let up = bar.up as f32 * scale;
-        let x = centre - width / 2.0;
-        let bottom = chart.bottom();
-        if bar.down > 0 {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(x, bottom - down.max(1.0)),
-                    Pos2::new(x + width, bottom),
-                ),
-                radius(if width > 4.0 { 2.0 } else { 0.0 }),
-                p.down,
-            );
-        }
-        if bar.up > 0 {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(x, bottom - down - up.max(1.0)),
-                    Pos2::new(x + width, bottom - down),
-                ),
-                radius(if width > 4.0 { 2.0 } else { 0.0 }),
-                p.up,
-            );
-        }
-    }
-    let labels = Rect::from_min_max(Pos2::new(rect.left(), chart.bottom() + 4.0), rect.max);
-    if let (Some(first), Some(last)) = (bars.first(), bars.last()) {
-        paint_text(
-            painter,
-            labels,
-            Align2::LEFT_CENTER,
-            &first.label,
-            sans(12.0),
-            p.dim,
-        );
-        if bars.len() > 1 {
-            paint_text(
-                painter,
-                labels,
-                Align2::RIGHT_CENTER,
-                &last.label,
-                sans(12.0),
-                p.dim,
-            );
-        }
-    }
-    if let Some(index) = hovered {
-        let bar = &bars[index];
-        response.on_hover_text(format!(
-            "{}\nDownloaded {}\nUploaded {}",
-            bar.label,
-            format_bytes(bar.down as f64),
-            format_bytes(bar.up as f64)
-        ));
-    }
 }
 
 #[cfg(test)]

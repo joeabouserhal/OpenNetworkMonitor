@@ -1,16 +1,15 @@
 use crate::{
     alerts::AlertConfig,
-    graph::Graph,
     icons::IconCache,
     model::*,
     store::Store,
-    traffic::{Breakdown, RankedUsage, breakdown, executable_directory, executable_filename},
+    traffic::{Breakdown, breakdown, executable_directory, executable_filename},
     tray::Tray,
-    widgets::{self, install_fonts},
+    ui::tokens::{BaseColor, Scheme, Tokens},
     worker::{Command, Shared, Worker},
 };
 use anyhow::Result;
-use eframe::egui::{self, Color32, RichText, Vec2};
+use eframe::egui::{self, Vec2};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -19,30 +18,48 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod adapters;
 mod app_timeline;
-mod apps;
 mod connection_tools;
-mod connections;
 mod dialogs;
-mod filters;
-mod overall;
+mod logic;
+mod pages;
 mod period;
-mod settings_page;
-mod shell;
-mod theme;
-use period::{CustomPeriod, PERIODS, period_caption};
-use theme::Theme;
+pub use pages::{DEFAULT_WINDOW_SIZE, MIN_LOGICAL_SIZE, MIN_WINDOW_SIZE};
+use period::{CustomPeriod, DateTimeFields, PERIODS, PeriodMode, Unit, period_caption};
 
-#[cfg(feature = "ui-preview")]
+#[cfg(any(test, feature = "ui-preview"))]
 mod preview;
 #[cfg(test)]
 mod tests;
 
+/// The palette names older releases saved. They are only read, to carry a light or dark
+/// choice over to the current appearance setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum LegacyTheme {
+    #[default]
+    Dark,
+    Light,
+    Nord,
+    Mocha,
+}
+
+/// Light, dark, or whichever Windows is using.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum Appearance {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
-    theme: Theme,
+    theme: LegacyTheme,
+    /// The appearance chosen in the current interface. Unknown (none) in settings saved
+    /// before it existed, which fall back to `follow_system` and `theme`.
+    appearance: Option<Appearance>,
+    base_color: BaseColor,
     filter: Filter,
     close_to_tray: bool,
     geo: Option<PathBuf>,
@@ -70,19 +87,41 @@ impl Settings {
             reset_day: self.cap_reset_day.clamp(1, 28),
         }
     }
-    fn active_theme(&self, ctx: &egui::Context) -> Theme {
-        Theme::resolve(self.follow_system, ctx.system_theme(), self.theme)
+    fn appearance(&self) -> Appearance {
+        self.appearance.unwrap_or(if self.follow_system {
+            Appearance::System
+        } else if self.theme == LegacyTheme::Light {
+            Appearance::Light
+        } else {
+            Appearance::Dark
+        })
+    }
+    /// The colour scheme to draw with now.
+    fn scheme(&self, ctx: &egui::Context) -> Scheme {
+        match self.appearance() {
+            Appearance::Light => Scheme::Light,
+            Appearance::Dark => Scheme::Dark,
+            Appearance::System => match ctx.system_theme() {
+                Some(egui::Theme::Dark) => Scheme::Dark,
+                _ => Scheme::Light,
+            },
+        }
+    }
+    fn tokens(&self, ctx: &egui::Context) -> Tokens {
+        Tokens::new(self.scheme(ctx), self.base_color)
     }
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: Theme::Dark,
+            theme: LegacyTheme::Dark,
+            appearance: None,
+            base_color: BaseColor::Zinc,
             filter: Filter::default(),
             close_to_tray: true,
             geo: None,
             bits: false,
-            ui_scale: 0.9,
+            ui_scale: DEFAULT_UI_SCALE,
             wide_summary_initialized: false,
             follow_system: false,
             intro_seen: None,
@@ -117,14 +156,15 @@ impl Page {
             Self::Settings => "Settings",
         }
     }
-    fn icon(self) -> widgets::Icon {
-        match self {
-            Self::Overview => widgets::Icon::Overview,
-            Self::Connections => widgets::Icon::Connections,
-            Self::Adapters => widgets::Icon::Adapters,
-            Self::Settings => widgets::Icon::Settings,
-        }
-    }
+}
+/// What the Overview's app list shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TopAppsView {
+    /// The busiest apps in the selected period.
+    #[default]
+    Top,
+    /// The apps that last used the network, however long ago.
+    Recent,
 }
 /// The filtered Connections list, remembered until a new snapshot or search.
 #[derive(Default)]
@@ -166,7 +206,6 @@ pub struct MonitorApp {
     data: Shared,
     settings: Settings,
     page: Page,
-    graph: Graph,
     show_down: bool,
     show_up: bool,
     log: bool,
@@ -192,6 +231,9 @@ pub struct MonitorApp {
     timeline_mode: app_timeline::TimelineMode,
     /// The app whose timeline the worker was last asked to read.
     focus_sent: Option<(String, SeriesView)>,
+    top_apps_view: TopAppsView,
+    /// The interface size the window's minimum size was last set for.
+    min_size_for: Option<f32>,
     /// The pause choice the worker was last given.
     pause_sent: bool,
     /// The last time the tray tooltip was refreshed, by snapshot.
@@ -205,10 +247,10 @@ pub struct MonitorApp {
     breakdown_cache: Arc<Breakdown>,
     breakdown_cache_key: Option<(u64, u64, u64, String, Option<String>)>,
     host_request: Option<Instant>,
-    /// Theme the title bar was last coloured for.
-    titlebar: Option<Theme>,
-    /// Theme whose palette is installed in the window.
-    applied_theme: Theme,
+    /// Colours the title bar was last painted with.
+    titlebar: Option<Tokens>,
+    /// Colours installed in the window.
+    applied: Tokens,
     /// The last window record eframe saved that described a real window.
     window_record: Option<String>,
 }
@@ -220,24 +262,23 @@ impl MonitorApp {
         let first_run = saved.is_none();
         let mut settings = saved.unwrap_or_default();
         // New installs match Windows; a saved choice is never changed behind its back.
-        settings.follow_system |= first_run;
+        if first_run {
+            settings.appearance = Some(Appearance::System);
+        }
         settings.intro_seen.get_or_insert(!first_run);
         settings.filter.search.clear();
         settings.filter.apps.clear();
         settings.filter.scope = Scope::All;
-        install_fonts(&cc.egui_ctx);
-        let active_theme = settings.active_theme(&cc.egui_ctx);
-        active_theme.apply(&cc.egui_ctx);
+        crate::ui::text::install_fonts(&cc.egui_ctx);
+        let tokens = settings.tokens(&cc.egui_ctx);
+        crate::ui::tokens::install(&cc.egui_ctx, tokens);
         let window_record = cc
             .storage
             .and_then(|storage| storage.get_string(WINDOW_KEY))
             .filter(|record| crate::window_state::is_sane(record));
         // Done before the window is first shown so the title bar never flashes its default colour.
-        let titlebar = crate::titlebar::apply(
-            cc,
-            crate::titlebar::Colors::from_palette(&active_theme.palette()),
-        )
-        .then_some(active_theme);
+        let titlebar = crate::titlebar::apply(cc, crate::titlebar::Colors::from_tokens(&tokens))
+            .then_some(tokens);
         settings.ui_scale = valid_ui_scale(settings.ui_scale);
         cc.egui_ctx.set_zoom_factor(settings.ui_scale);
         let cap_input = format_allowance(settings.cap_gib);
@@ -277,7 +318,6 @@ impl MonitorApp {
             data: Shared::default(),
             settings,
             page: Page::Overview,
-            graph: Graph,
             show_down: true,
             show_up: true,
             log: false,
@@ -303,6 +343,8 @@ impl MonitorApp {
             focus_sent: None,
             alerts_sent: AlertConfig::default(),
             notice_seen: None,
+            top_apps_view: TopAppsView::Top,
+            min_size_for: None,
             pause_sent: false,
             tooltip_revision: 0,
             cap_input,
@@ -310,7 +352,7 @@ impl MonitorApp {
             breakdown_cache_key: None,
             host_request: None,
             titlebar,
-            applied_theme: active_theme,
+            applied: tokens,
             window_record,
         })
     }
@@ -362,7 +404,9 @@ impl MonitorApp {
             self.page = target;
         }
         if search {
-            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(widgets::SEARCH_ID)));
+            ctx.memory_mut(|memory| {
+                memory.request_focus(egui::Id::new(crate::ui::controls::SEARCH_ID))
+            });
         }
         if export {
             self.export(ctx);
@@ -447,7 +491,7 @@ impl MonitorApp {
         (down as f64 / interval, up as f64 / interval)
     }
     fn rate(&self, value: f64) -> String {
-        crate::graph::speed_label(value, self.settings.bits)
+        crate::ui::chart::speed_label(value, self.settings.bits)
     }
     fn label(&self, path: &str) -> String {
         self.data
@@ -648,18 +692,24 @@ impl eframe::App for MonitorApp {
         }
     }
     fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
-        let active = self.settings.active_theme(root.ctx());
-        if self.applied_theme != active {
-            active.apply(root.ctx());
-            self.applied_theme = active;
+        // Pages are laid out for a minimum logical size; keep the window from going below it
+        // at whatever interface size is chosen.
+        if self.min_size_for != Some(self.settings.ui_scale) {
+            root.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(
+                    Vec2::from(MIN_LOGICAL_SIZE) * self.settings.ui_scale,
+                ));
+            self.min_size_for = Some(self.settings.ui_scale);
+        }
+        let tokens = self.settings.tokens(root.ctx());
+        if self.applied != tokens {
+            crate::ui::tokens::install(root.ctx(), tokens);
+            self.applied = tokens;
             root.ctx().request_repaint();
         }
-        if self.titlebar != Some(active) {
-            crate::titlebar::apply(
-                &*frame,
-                crate::titlebar::Colors::from_palette(&active.palette()),
-            );
-            self.titlebar = Some(active);
+        if self.titlebar != Some(tokens) {
+            crate::titlebar::apply(&*frame, crate::titlebar::Colors::from_tokens(&tokens));
+            self.titlebar = Some(tokens);
         }
         self.shortcuts(root.ctx());
         self.draw(root);
@@ -710,17 +760,18 @@ fn toggle_adapter(
     }
 }
 fn initial_wide_size(current: Vec2, monitor: Option<Vec2>) -> Vec2 {
-    let width = current.x.max(widgets::DEFAULT_WINDOW_SIZE[0]);
-    let width = monitor.map_or(width, |m| {
-        width.min((m.x - 32.0).max(widgets::MIN_WINDOW_SIZE[0]))
-    });
+    let width = current.x.max(DEFAULT_WINDOW_SIZE[0]);
+    let width = monitor.map_or(width, |m| width.min((m.x - 32.0).max(MIN_WINDOW_SIZE[0])));
     Vec2::new(width, current.y)
 }
+/// New installs open a little smaller than 100% so more of each page is on screen.
+const DEFAULT_UI_SCALE: f32 = 0.85;
+
 fn valid_ui_scale(scale: f32) -> f32 {
     if scale.is_finite() {
         scale.clamp(0.8, 1.1)
     } else {
-        0.9
+        DEFAULT_UI_SCALE
     }
 }
 fn format_count(value: u64) -> String {
@@ -741,9 +792,6 @@ fn format_allowance(gib: f32) -> String {
     } else {
         format!("{gib}")
     }
-}
-fn compact_bytes(value: u64) -> String {
-    crate::model::format_compact_bytes(value)
 }
 fn app_name(path: &str) -> String {
     executable_filename(path)

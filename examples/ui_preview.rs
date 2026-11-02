@@ -1,5 +1,5 @@
 use eframe::egui;
-use open_network_monitor::{app::MonitorApp, widgets};
+use open_network_monitor::app::{DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, MonitorApp};
 struct Preview(MonitorApp);
 impl eframe::App for Preview {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -16,9 +16,9 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("OpenNetworkMonitor · UI preview")
             .with_inner_size(if small {
-                widgets::MIN_WINDOW_SIZE
+                MIN_WINDOW_SIZE
             } else {
-                widgets::DEFAULT_WINDOW_SIZE
+                DEFAULT_WINDOW_SIZE
             })
             .with_min_inner_size([960.0, 680.0]),
         renderer: eframe::Renderer::Glow,
@@ -29,10 +29,10 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let app = MonitorApp::preview(&cc.egui_ctx, &page, light);
-            let palette = widgets::Palette::of(&cc.egui_ctx);
+            let tokens = open_network_monitor::ui::tokens::tk(&cc.egui_ctx);
             open_network_monitor::titlebar::apply(
                 cc,
-                open_network_monitor::titlebar::Colors::from_palette(&palette),
+                open_network_monitor::titlebar::Colors::from_tokens(&tokens),
             );
             Ok(Box::new(Preview(app)))
         }),

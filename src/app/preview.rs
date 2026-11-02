@@ -1,4 +1,5 @@
 use super::*;
+use eframe::egui::Color32;
 
 const PREVIEW_PATHS: [&str; 5] = [
     r"C:\Program Files\Helium\Application\chrome.exe",
@@ -10,15 +11,20 @@ const PREVIEW_PATHS: [&str; 5] = [
 
 impl MonitorApp {
     /// Isolated visual-development harness: no tray, capture, user settings or history writes.
-    #[cfg(feature = "ui-preview")]
+    #[cfg(any(test, feature = "ui-preview"))]
     pub fn preview(ctx: &egui::Context, page: &str, light: bool) -> Self {
-        install_fonts(ctx);
+        crate::ui::text::install_fonts(ctx);
         let settings = Settings {
-            theme: if light { Theme::Light } else { Theme::Dark },
+            appearance: Some(if light {
+                Appearance::Light
+            } else {
+                Appearance::Dark
+            }),
             close_to_tray: false,
             ..Default::default()
         };
-        settings.theme.apply(ctx);
+        let tokens = settings.tokens(ctx);
+        crate::ui::tokens::install(ctx, tokens);
         ctx.set_zoom_factor(settings.ui_scale);
         let mut app = Self {
             worker: Worker::for_ui_test(),
@@ -33,7 +39,6 @@ impl MonitorApp {
                 "settings" => Page::Settings,
                 _ => Page::Overview,
             },
-            graph: Graph,
             show_down: true,
             show_up: true,
             log: false,
@@ -59,6 +64,8 @@ impl MonitorApp {
             focus_sent: None,
             alerts_sent: Default::default(),
             notice_seen: None,
+            top_apps_view: TopAppsView::Top,
+            min_size_for: None,
             pause_sent: false,
             tooltip_revision: 0,
             cap_input: "100".into(),
@@ -66,7 +73,7 @@ impl MonitorApp {
             breakdown_cache_key: None,
             host_request: None,
             titlebar: None,
-            applied_theme: Theme::Dark,
+            applied: tokens,
             window_record: None,
         };
         if page == "apps" {
@@ -97,7 +104,7 @@ impl MonitorApp {
         app.refresh_preview();
         app
     }
-    #[cfg(feature = "ui-preview")]
+    #[cfg(any(test, feature = "ui-preview"))]
     pub fn refresh_preview(&mut self) {
         use std::net::IpAddr;
         if self.data.history_revision == self.filter_revision && !self.data.history.rows.is_empty()
@@ -161,6 +168,14 @@ impl MonitorApp {
             .top_apps
             .sort_by_key(|a| std::cmp::Reverse(a.down + a.up));
         self.data.top_apps.truncate(5);
+        self.data.recent_apps = PREVIEW_PATHS
+            .iter()
+            .zip([40, 400, 5_000, 90_000, 700_000])
+            .map(|(path, age)| RecentApp {
+                app: (*path).to_owned(),
+                last_seen: now - age,
+            })
+            .collect();
         Arc::make_mut(&mut self.data.snapshot).connections = (0..85)
             .map(|i| Connection {
                 pid: 4200 + i as u32,
@@ -300,317 +315,149 @@ impl MonitorApp {
 #[cfg(test)]
 mod render_tests {
     use super::*;
+    use crate::ui::scene::{self, Step};
 
-    /// Scripted pointer input applied before a preview frame is captured.
-    enum Step {
-        Click(&'static str),
-        ClickAt(f32, f32),
-        Hover(f32, f32),
-    }
-    fn texts(out: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
-        fn collect(shape: &egui::Shape, into: &mut Vec<(String, egui::Pos2)>) {
-            match shape {
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, into)),
-                egui::Shape::Text(t) => into.push((t.galley.job.text.clone(), t.pos)),
-                _ => {}
-            }
-        }
-        let mut all = Vec::new();
-        out.shapes.iter().for_each(|s| collect(&s.shape, &mut all));
-        all
-    }
-    fn press(pos: egui::Pos2) -> Vec<egui::Event> {
-        let button = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
-        vec![egui::Event::PointerMoved(pos), button(true), button(false)]
-    }
+    type Setup = fn(&mut MonitorApp);
 
     #[test]
     #[ignore = "Exports the app's own headless egui geometry for offline visual review"]
+    #[allow(clippy::type_complexity)]
     fn export_ui_review() {
-        use std::collections::HashMap;
-        type Atlas = HashMap<String, ([usize; 2], Vec<[u8; 4]>)>;
-        fn apply_textures(textures: &mut Atlas, out: &mut egui::FullOutput) {
-            for (id, deltas) in &out.textures_delta.set {
-                for delta in deltas {
-                    let egui::ImageData::Color(image) = &delta.image;
-                    let key = format!("{id:?}");
-                    if let Some(offset) = delta.pos {
-                        let (target_size, target) = textures.get_mut(&key).unwrap();
-                        for y in 0..image.size[1] {
-                            for x in 0..image.size[0] {
-                                target[(offset[1] + y) * target_size[0] + offset[0] + x] =
-                                    image.pixels[y * image.size[0] + x].to_array();
-                            }
-                        }
-                    } else {
-                        textures.insert(
-                            key,
-                            (
-                                image.size,
-                                image.pixels.iter().map(|c| c.to_array()).collect(),
-                            ),
-                        );
-                    }
-                }
-            }
-            out.textures_delta.clear();
-        }
-        let output_dir = PathBuf::from("target/ui-review");
-        std::fs::create_dir_all(&output_dir).unwrap();
-        let wide = widgets::DEFAULT_WINDOW_SIZE;
-        for (name, page, light, size, steps) in [
-            ("apps", "apps", false, [1200.0, 820.0], vec![]),
-            ("apps-small", "apps", false, [960.0, 680.0], vec![]),
-            ("apps-timeline", "apps", false, [1200.0, 820.0], vec![]),
-            ("apps-timeline-small", "apps", true, [960.0, 680.0], vec![]),
-            ("overview-intro", "overview", false, wide, vec![]),
+        let wide = DEFAULT_WINDOW_SIZE;
+        let small = MIN_WINDOW_SIZE;
+        let scenes: Vec<(&str, &str, bool, [f32; 2], Vec<Step>, Setup)> = vec![
+            ("overview", "overview", false, wide, vec![], |_| {}),
+            ("overview-light", "overview", true, wide, vec![], |_| {}),
+            ("overview-small", "overview", false, small, vec![], |_| {}),
+            ("overview-recent", "overview", false, wide, vec![], |app| {
+                app.top_apps_view = TopAppsView::Recent;
+            }),
             (
-                "overview-intro-small",
+                "overview-small-light",
                 "overview",
                 true,
-                [960.0, 680.0],
+                small,
                 vec![],
+                |_| {},
             ),
+            ("apps", "apps", false, wide, vec![], |_| {}),
+            ("apps-light", "apps", true, wide, vec![], |_| {}),
+            ("apps-small", "apps", false, small, vec![], |_| {}),
+            ("apps-timeline", "apps", false, wide, vec![], |app| {
+                select_timeline(app, false);
+            }),
+            ("apps-timeline-daily", "apps", true, wide, vec![], |app| {
+                select_timeline(app, true);
+            }),
+            ("connections", "connections", false, wide, vec![], |_| {}),
             (
-                "apps-timeline-daily",
-                "apps",
+                "connections-light",
+                "connections",
+                true,
+                small,
+                vec![],
+                |_| {},
+            ),
+            ("adapters", "adapters", false, wide, vec![], |_| {}),
+            ("adapters-small", "adapters", true, small, vec![], |_| {}),
+            (
+                "settings",
+                "settings",
                 false,
-                [1200.0, 820.0],
+                [1200.0, 1900.0],
                 vec![],
+                |app| {
+                    app.settings.cap_enabled = true;
+                    app.settings.alert_new_apps = true;
+                    app.data.cap = Some(crate::worker::CapStatus {
+                        used: 86 * 1_073_741_824,
+                        limit: 100 * 1_073_741_824,
+                        cycle_start: chrono::Utc::now().timestamp() - 20 * 86_400,
+                    });
+                },
             ),
-            ("adapter-small", "overview", false, [960.0, 680.0], vec![]),
-            ("overall-other", "overview", false, [960.0, 680.0], vec![]),
-            ("overall-smooth", "overview", false, wide, vec![]),
-            ("overall-wide", "overview", false, wide, vec![]),
-            ("overall-no-apps", "overview", false, wide, vec![]),
-            ("connections", "connections", false, [1200.0, 820.0], vec![]),
-            ("adapters", "adapters", false, [960.0, 680.0], vec![]),
-            ("settings", "settings", false, [1200.0, 820.0], vec![]),
             (
-                "settings-alerts",
+                "settings-light",
                 "settings",
                 true,
-                [1200.0, 1400.0],
+                [1200.0, 1900.0],
                 vec![],
+                |_| {},
             ),
-            ("apps-light", "apps", true, [1200.0, 820.0], vec![]),
-            ("overall-light", "overview", true, wide, vec![]),
-            ("period-dates", "overview", false, [960.0, 680.0], vec![]),
-            (
-                "period-dates-light",
-                "overview",
-                true,
-                [960.0, 680.0],
-                vec![],
-            ),
-            ("period-rolling", "overview", false, [960.0, 680.0], vec![]),
-            (
-                "period-rolling-light",
-                "overview",
-                true,
-                [960.0, 680.0],
-                vec![],
-            ),
+            ("intro", "overview", false, wide, vec![], |app| {
+                app.settings.intro_seen = Some(false);
+            }),
             (
                 "menu-period",
                 "overview",
                 false,
                 wide,
                 vec![Step::Click("Period")],
+                |_| {},
             ),
             (
-                "menu-adapters",
-                "apps",
-                false,
-                wide,
-                vec![Step::Click("Adapters")],
-            ),
-            (
-                "menu-networks-light",
+                "menu-adapters-light",
                 "apps",
                 true,
                 wide,
-                vec![Step::Click("Networks")],
+                vec![Step::Click("Adapters")],
+                |_| {},
             ),
+            ("period-dialog", "overview", false, small, vec![], |app| {
+                app.custom_period = Some(CustomPeriod::from_filter(&app.settings.filter));
+            }),
             (
-                "menu-chart",
+                "period-dialog-light",
                 "overview",
-                false,
-                wide,
-                vec![Step::ClickAt(1537.0, 169.0)],
+                true,
+                small,
+                vec![],
+                |app| {
+                    let mut period = CustomPeriod::from_filter(&app.settings.filter);
+                    period.mode = PeriodMode::Dates;
+                    app.custom_period = Some(period);
+                },
             ),
-            (
-                "hover-chart",
-                "overview",
-                false,
-                wide,
-                vec![Step::Hover(1478.0, 478.0)],
-            ),
-            (
-                "calendar",
-                "overview",
-                false,
-                [960.0, 680.0],
-                vec![Step::ClickAt(621.0, 372.0)],
-            ),
-        ] {
+            ("end-process", "connections", false, small, vec![], |app| {
+                app.pending_end = Some((4242, "Steam".into()));
+            }),
+        ];
+        for (name, page, light, size, steps, setup) in scenes {
             let ctx = egui::Context::default();
             let mut app = MonitorApp::preview(&ctx, page, light);
-            if name == "settings-alerts" {
-                app.settings.cap_enabled = true;
-                app.settings.alert_new_apps = true;
-                app.settings.cap_reset_day = 12;
-                app.data.cap = Some(crate::worker::CapStatus {
-                    used: 86 * 1_073_741_824,
-                    limit: 100 * 1_073_741_824,
-                    cycle_start: chrono::Utc::now().timestamp() - 20 * 86_400,
-                });
-            }
-            if name.starts_with("overview-intro") {
-                app.settings.intro_seen = Some(false);
-            }
-            if name.starts_with("apps-timeline") {
-                let now = chrono::Utc::now().timestamp() / 60 * 60;
-                let daily = name.ends_with("daily");
-                app.selected_app = Some(PREVIEW_PATHS[1].to_owned());
-                let (view, step, span) = if daily {
-                    app.timeline_mode = super::app_timeline::TimelineMode::Daily;
-                    (crate::model::SeriesView::Daily, 3600, 30 * 86_400)
-                } else {
-                    (crate::model::SeriesView::Period, 300, 86_400)
-                };
-                let count = span / step;
-                app.data.app_series = Some(Arc::new(crate::model::AppSeries {
-                    app: PREVIEW_PATHS[1].to_owned(),
-                    view,
-                    read_at: 0,
-                    revision: app.filter_revision,
-                    step,
-                    window: (now - span, now),
-                    points: (0..count)
-                        .filter(|i| i % 7 != 3)
-                        .map(|i| {
-                            let wave = ((i as f64 / 14.0).sin().abs() * 9_000_000.0) as u64;
-                            (now - span + i * step, wave + 400_000, wave / 6 + 50_000)
-                        })
-                        .collect(),
-                }));
-            }
-            if name.starts_with("period-") || name == "calendar" {
-                let filter = Filter {
-                    seconds: 86400,
-                    time_range: if name.starts_with("period-dates") || name == "calendar" {
-                        Some(TimeRange {
-                            start: 1782864000,
-                            end: 1782950399,
-                        })
-                    } else {
-                        None
-                    },
-                    ..Default::default()
-                };
-                app.custom_period = Some(CustomPeriod::from_filter(&filter));
-            }
-            if name == "overall-smooth" {
-                app.settings.filter.seconds = 300;
-                let history = Arc::make_mut(&mut app.data.history);
-                history.window_start = history.window_end - 300;
-            }
-            if name == "overall-no-apps" {
-                app.data.top_apps.clear();
-            }
-            if name == "overall-other" {
-                let other = app.data.classified.wan / 10;
-                app.data.classified.wan -= other;
-                app.data.classified.unknown = other;
-            }
-            let mut textures = HashMap::<String, ([usize; 2], Vec<[u8; 4]>)>::new();
-            let mut geometry = Vec::new();
-            let mut last_text: Vec<(String, egui::Pos2)> = Vec::new();
-            let mut clock = 0.0;
-            let mut hover = None;
-            let input = |app: &MonitorApp, clock: f64, events: Vec<egui::Event>| egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    Vec2::from(size) / app.settings.ui_scale,
-                )),
-                time: Some(clock),
-                events,
-                ..Default::default()
-            };
-            // Settle layout for three frames, then run each scripted step followed by three more.
-            for frame in 0..3 + steps.len() * 3 {
-                let mut events = Vec::new();
-                if frame >= 3 && (frame - 3) % 3 == 0 {
-                    match &steps[(frame - 3) / 3] {
-                        Step::Click(label) => {
-                            let at = last_text
-                                .iter()
-                                .rfind(|(text, _)| text == label)
-                                .unwrap_or_else(|| panic!("Missing {label}"))
-                                .1;
-                            events = press(at + Vec2::new(4.0, 5.0));
-                        }
-                        Step::ClickAt(x, y) => events = press(egui::pos2(*x, *y)),
-                        Step::Hover(x, y) => {
-                            let pos = egui::pos2(*x, *y);
-                            hover = Some(pos);
-                            events = vec![egui::Event::PointerMoved(pos)];
-                        }
-                    }
-                }
-                clock += if frame >= 3 { 0.25 } else { 0.05 };
-                let mut out = ctx.run_ui(input(&app, clock, events), |root| {
-                    app.draw(root);
-                });
-                if hover.is_some() {
-                    // egui restarts its tooltip timer on every move event, so hold the pointer
-                    // still while time advances past the tooltip delay.
-                    for _ in 0..4 {
-                        apply_textures(&mut textures, &mut out);
-                        clock += 0.3;
-                        out = ctx.run_ui(input(&app, clock, vec![]), |root| {
-                            app.draw(root);
-                        });
-                    }
-                }
-                last_text = texts(&out);
-                apply_textures(&mut textures, &mut out);
-                let primitives = ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
-                geometry=primitives.into_iter().filter_map(|p|match p.primitive {
-                    egui::epaint::Primitive::Mesh(mesh)=>Some(serde_json::json!({"clip":[p.clip_rect.min.x*out.pixels_per_point,p.clip_rect.min.y*out.pixels_per_point,p.clip_rect.max.x*out.pixels_per_point,p.clip_rect.max.y*out.pixels_per_point],"texture":format!("{:?}",mesh.texture_id),"vertices":mesh.vertices.iter().map(|v|(v.pos.x*out.pixels_per_point,v.pos.y*out.pixels_per_point,v.uv.x,v.uv.y,v.color.to_array())).collect::<Vec<_>>(),"indices":mesh.indices})),
-                    _=>None,
-                }).collect();
-            }
-            let texture_json: Vec<_> = textures
-                .into_iter()
-                .enumerate()
-                .map(|(n, (id, (size, pixels)))| {
-                    let file = format!("{name}-atlas-{n}.rgba");
-                    std::fs::write(
-                        output_dir.join(&file),
-                        pixels.into_iter().flatten().collect::<Vec<_>>(),
-                    )
-                    .unwrap();
-                    serde_json::json!({"id":id,"size":size,"file":file})
-                })
-                .collect();
-            std::fs::write(
-                output_dir.join(format!("{name}.json")),
-                serde_json::to_vec(&serde_json::json!({
-                    "size":size,
-                    "background":ctx.global_style().visuals.panel_fill.to_array(),
-                    "textures":texture_json,
-                    "meshes":geometry,
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+            setup(&mut app);
+            let scale = app.settings.ui_scale;
+            scene::export_in(&ctx, name, size, scale, &steps, |ui| {
+                app.refresh_preview();
+                app.draw(ui);
+            });
         }
+    }
+
+    /// Selects the first sample app and fills its timeline with sample bars.
+    fn select_timeline(app: &mut MonitorApp, daily: bool) {
+        let now = chrono::Utc::now().timestamp() / 60 * 60;
+        app.selected_app = Some(PREVIEW_PATHS[1].to_owned());
+        let (view, step, span) = if daily {
+            app.timeline_mode = super::app_timeline::TimelineMode::Daily;
+            (crate::model::SeriesView::Daily, 3600, 30 * 86_400)
+        } else {
+            (crate::model::SeriesView::Period, 300, 86_400)
+        };
+        app.data.app_series = Some(Arc::new(crate::model::AppSeries {
+            app: PREVIEW_PATHS[1].to_owned(),
+            view,
+            read_at: 0,
+            revision: app.filter_revision,
+            step,
+            window: (now - span, now),
+            points: (0..span / step)
+                .filter(|i| i % 7 != 3)
+                .map(|i| {
+                    let wave = ((i as f64 / 14.0).sin().abs() * 9_000_000.0) as u64;
+                    (now - span + i * step, wave + 400_000, wave / 6 + 50_000)
+                })
+                .collect(),
+        }));
     }
 }

@@ -79,9 +79,11 @@ jobs:
         with:
           command: check advisories
 
-  # Pushing a tag such as v0.4.0 publishes the executable built above as a GitHub release.
+  # A push to main whose Cargo.toml version has no release yet creates the tag (on that
+  # commit) and publishes the executable built above. Bump the version to ship a release.
+  # Pushing a tag such as v0.5.0 by hand does the same, if the tag matches Cargo.toml.
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     needs: verify
     runs-on: windows-latest
     timeout-minutes: 15
@@ -89,21 +91,33 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: The tag must match the version in Cargo.toml
-        shell: pwsh
-        run: |
-          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-          if ('v' + $version -ne '${{ github.ref_name }}') {
-            throw "Tag ${{ github.ref_name }} does not match Cargo.toml version $version."
-          }
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: OpenNetworkMonitor-windows
-          path: release
-      - name: Publish the release
+      - name: Work out the tag
+        id: tag
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create '${{ github.ref_name }}' release/OpenNetworkMonitor.exe `
-            --title '${{ github.ref_name }}' --generate-notes
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          $tag = "v$version"
+          if ('${{ github.ref_type }}' -eq 'tag' -and '${{ github.ref_name }}' -ne $tag) {
+            throw "Tag ${{ github.ref_name }} does not match Cargo.toml version $version."
+          }
+          gh release view $tag *> $null
+          $exists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "publish=$((-not $exists).ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($exists) { Write-Host "Release $tag already exists; nothing to publish." }
+      - if: steps.tag.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: OpenNetworkMonitor-windows
+          path: release
+      - name: Create the tag and publish the release
+        if: steps.tag.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ steps.tag.outputs.tag }}' release/OpenNetworkMonitor.exe `
+            --target '${{ github.sha }}' --title '${{ steps.tag.outputs.tag }}' --generate-notes

@@ -12,10 +12,10 @@ The desktop executable has a single collector thread and an egui/eframe UI threa
 - `worker.rs`: sampling, endpoint aggregation, offline geolocation, SQLite writes and alerts. History queries, an app's timeline and CSV export run on their own read-only connections and threads, so neither rendering nor a slow query holds up collection.
 - `store.rs`: SQLite WAL mode, transactional minute upserts, gap-aware chart series, filtered export with formula escaping. Failed writes are retained for retry up to a bounded row limit, after which a persistent warning reports that history stopped.
 - `graph.rs`: custom egui plot with direction toggles, log scale, time labels and a hover crosshair with tooltip, plus the LAN/WAN destination breakdown.
-- `widgets.rs`: the design system: palette tokens, typography, icons and the shared controls (see v0.4 below).
+- `ui/`: the design system (see "Interface" below): `tokens` (colours), `text` (Inter and painting helpers), `icon`, `button`, `controls`, `layout` (card, tabs, select, menus, table helpers, dialog), `chart`, `a11y`, plus `gallery` and `scene` for offscreen review.
 - `icons.rs`: bounded, background Windows executable icon extraction and cached egui textures for visible app rows. Missing icons use a fallback and can be retried.
 - `tray.rs`: native tray icon/menu, direct Exit and UI wake-up.
-- `app.rs`: view state, filters, caches and persisted preferences. Pages live in `app/`: `shell` (sidebar, header, banners), `overall`, `apps`, `connections`, `adapters`, `settings_page`, `filters` (period/adapter/network popovers), `period` (custom period dialog) and `theme` (the four palettes).
+- `app.rs`: view state, filters, caches and persisted preferences. Pages live in `app/pages/`: `mod` (sidebar, header, banners, welcome card), `overview` (stat cards, chart, top apps, destinations), `apps` (tables and the app timeline), `connections`, `adapters`, `settings`, `toolbar` (period, adapter and network selects) and `dialogs` (custom period). `app/logic.rs`, `app/period.rs`, `app/connection_tools.rs` and `app/app_timeline.rs` hold the non-drawing logic.
 - `main.rs`: startup, local data path, diagnostics and generated-traffic verification.
 
 ## Measurement contract
@@ -180,3 +180,18 @@ The tray menu's check item and Open Settings set flags that the window reads eac
 ## Accessibility of painted text
 
 Text painted directly onto the canvas is invisible to screen readers, so `widgets::describe` registers a labelled node over its rectangle, and rows and charts add labels to their own responses. A test enables AccessKit and reads the labels back.
+
+
+## Interface (shadcn-style rewrite)
+
+The whole interface was rewritten from scratch in the style of shadcn/ui; the earlier palette-and-widgets design system was removed. Capture, storage, the worker and every piece of logic are unchanged.
+
+**Tokens.** ui/tokens.rs mirrors shadcn's CSS variables (background, foreground, card, popover, primary, secondary, muted, accent, destructive, border, input, ring) on the zinc scale, in light and dark. A base colour changes only the primary colour, focus ring and download series. The tokens live in egui's context data and are read with `tk(ctx)`. A test checks WCAG contrast for the text pairs in every scheme and base colour. Settings keep the old `theme` and `follow_system` fields only to read them: Light stays Light, every other palette becomes Dark, and `follow_system` becomes System.
+
+**Type and icons.** Inter Regular, Medium and SemiBold are embedded and registered as the proportional, `medium` and `semibold` families, with egui's bundled fonts behind them for symbols. Icons are Lucide-style line drawings on a 24-unit grid, painted with stroke widths rounded to whole physical pixels.
+
+**Components.** Each control is a function or small builder that paints with the painter: buttons in six variants and four sizes, badges, cards, tabs, selects with popovers, menu items, switch, checkbox, slider (arrow keys), inputs, progress, alerts, tables (column layout, sortable headers, hover rows) and modal dialogs. Borders are one physical pixel; focus is a three-point translucent ring. Painted text that has no widget gets an AccessKit label through `ui::a11y::label`.
+
+**Charts.** ui/chart.rs draws the speed chart as monotone-smoothed areas with gradient fill, a dashed grid, crosshair and a tooltip card, breaking the line across unobserved time, and the per-app totals as stacked bars. The gallery (`cargo test --features ui-preview export_gallery -- --ignored`) shows every component in both schemes.
+
+**Layout.** The arrangement never changes with the window. The window has a minimum of 1120 x 780 points (enforced for the chosen interface size), and above that only widths and heights stretch: a full sidebar beside a centred page no wider than 1240 points, four stat tiles in a row, three tables side by side, three adapter cards across. Pages do not scroll. Cards that take the spare height (the speed chart, the three tables, the Connections table) are given it explicitly, and lists, the adapter cards and the Settings form scroll inside themselves. Tests draw every page in both schemes at five window sizes and scales, check that nothing is placed outside the window and that rows contain the same cards at every size, check that every outline is a whole number of physical pixels, click through the navigation, tabs, sort headers and menus, and read the accessibility labels back.

@@ -63,7 +63,7 @@ No subscription, telemetry, account, Npcap install, or Windows Data Usage servic
 ### Look and feel
 
 - A modern, minimal design with tonal cards, pill filters, and popovers.
-- Themes: **Slate** (default dark), **Light**, **Nord**, and **Catppuccin Mocha**. **Match Windows appearance** switches between Slate and Light with your system setting.
+- A minimal interface in the style of shadcn/ui: zinc neutrals, one-pixel borders, cards, tabs, bordered tables and Inter type. **Light**, **Dark** or **System** appearance, plus a choice of accent colour (Zinc, Slate, Stone, Red, Rose, Orange, Green, Blue, Yellow, Violet) in Settings. Saved Slate, Nord and Mocha choices become Dark.
 - Colour is reserved for data: download is blue, upload is orange. On Windows 11 the title bar matches the theme.
 - Interface size is adjustable from 80% to 110% in **Settings → Appearance** (default 90%).
 - Sidebar with Overview, Connections, Adapters, and Settings. In narrow windows it becomes an icon rail.

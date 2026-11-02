@@ -29,6 +29,9 @@ pub struct Shared {
     pub app_series: Option<Arc<AppSeries>>,
     /// Use of the monthly data cap so far, when a cap is on.
     pub cap: Option<CapStatus>,
+    /// The apps that most recently used the network, refreshed every few seconds.
+    pub recent_apps: Vec<RecentApp>,
+    pub recent_read_at: i64,
     pub series_generation: u64,
     pub notice: String,
     pub revision: u64,
@@ -211,6 +214,8 @@ struct HistoryRequest {
     revision: u64,
     focus: Option<(String, SeriesView)>,
 }
+/// How often the list of recently used apps is read again.
+const RECENT_REFRESH_SECONDS: i64 = 10;
 /// How long a daily or monthly timeline is reused before it is read again.
 const SERIES_REUSE_SECONDS: i64 = 30;
 /// Reads history, works out app labels and publishes both. Slow for long periods,
@@ -272,7 +277,18 @@ fn load_history(
         }
         None => None,
     };
+    // The recent list scans every app's last minute, so it is refreshed far less often than
+    // the history itself.
+    let recent = shared
+        .lock()
+        .ok()
+        .is_none_or(|state| now - state.recent_read_at >= RECENT_REFRESH_SECONDS)
+        .then(|| store.recent_apps(30).unwrap_or_default());
     if let Ok(mut s) = shared.lock() {
+        if let Some(recent) = recent {
+            s.recent_apps = recent;
+            s.recent_read_at = now;
+        }
         if s.app_series.as_deref() != series.as_deref() {
             s.app_series = series;
             s.series_generation += 1;
