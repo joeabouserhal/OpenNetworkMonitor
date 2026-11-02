@@ -110,14 +110,14 @@ From the project folder, run one of:
 .\build.cmd
 ```
 
-The script checks formatting, runs tests and strict Clippy, builds a release, and packages it under `dist/` as a versioned app folder, a ZIP, and a SHA-256 checksum.
+The script checks formatting, runs tests and strict Clippy, builds a release, and puts the single `OpenNetworkMonitor.exe` in `dist/`.
 
 **Handy options**
 
 | Command | What it does |
 | --- | --- |
 | `.\build.ps1 -SkipChecks` | Rebuild quickly once checks have already passed |
-| `.\build.ps1 -Configuration Debug` | Build a debug package |
+| `.\build.ps1 -Configuration Debug` | Build a debug executable (`dist/OpenNetworkMonitor-debug.exe`) |
 
 The script only writes to project-local folders. It doesn't install toolchains or change system settings. Compiling doesn't need administrator access.
 

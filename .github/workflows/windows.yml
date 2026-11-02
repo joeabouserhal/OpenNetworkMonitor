@@ -30,7 +30,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Check, build and package
+      - name: Check and build
         shell: pwsh
         run: ./build.ps1
       # Probes of the real Windows environment that need no elevation or network. They
@@ -43,13 +43,11 @@ jobs:
             cargo test --locked $probe -- --ignored
             if ($LASTEXITCODE -ne 0) { throw "$probe failed" }
           }
-      - name: Upload Windows package
+      - name: Upload the executable
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: OpenNetworkMonitor-windows
-          path: |
-            dist/*.zip
-            dist/*.sha256
+          path: dist/OpenNetworkMonitor.exe
           if-no-files-found: error
 
   # The version in Cargo.toml says the oldest compiler the project supports. This only
@@ -81,7 +79,7 @@ jobs:
         with:
           command: check advisories
 
-  # Pushing a tag such as v0.4.0 publishes the package built above as a GitHub release.
+  # Pushing a tag such as v0.4.0 publishes the executable built above as a GitHub release.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: verify
@@ -91,7 +89,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: The tag must match the package version
+      - name: The tag must match the version in Cargo.toml
         shell: pwsh
         run: |
           $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
@@ -107,5 +105,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create '${{ github.ref_name }}' (Get-ChildItem release -File).FullName `
+          gh release create '${{ github.ref_name }}' release/OpenNetworkMonitor.exe `
             --title '${{ github.ref_name }}' --generate-notes

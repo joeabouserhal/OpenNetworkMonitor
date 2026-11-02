@@ -96,49 +96,16 @@ try {
     Invoke-Cargo "Building $Configuration" $buildArguments
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Build output was not found at $executable. Check project-local Cargo target configuration." }
 
-    $packageName = "OpenNetworkMonitor-v$packageVersion-windows-$architecture"
-    if ($Configuration -eq 'Debug') { $packageName += '-debug' }
-    $packageRoot = Join-Path $distRoot $packageName
-    $packagedExe = Join-Path $packageRoot 'OpenNetworkMonitor.exe'
+    # The app is one self-contained executable, so that is all a build produces.
+    $outputName = if ($Configuration -eq 'Debug') { 'OpenNetworkMonitor-debug.exe' } else { 'OpenNetworkMonitor.exe' }
+    $packagedExe = Join-Path $distRoot $outputName
     Assert-ProjectOutput $packagedExe
-    New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
     Preserve-LockedExecutable $packagedExe
     Copy-Item -LiteralPath $executable -Destination $packagedExe -Force
-    foreach ($name in @('README.md', 'LICENSE', 'THIRD_PARTY.md')) {
-        Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination (Join-Path $packageRoot $name) -Force
-    }
-    foreach ($name in @('install.ps1', 'uninstall.ps1')) {
-        Copy-Item -LiteralPath (Join-Path $projectRoot ('scripts/' + $name)) -Destination (Join-Path $packageRoot $name) -Force
-    }
-    $docsRoot = Join-Path $packageRoot 'docs'
-    New-Item -ItemType Directory -Path $docsRoot -Force | Out-Null
-    foreach ($name in @('ADMIN.md', 'ARCHITECTURE.md', 'PRIVACY.md', 'ROADMAP.md', 'UNINSTALL.md', 'VALIDATION.md')) {
-        Copy-Item -LiteralPath (Join-Path $projectRoot ('docs/' + $name)) -Destination (Join-Path $docsRoot $name) -Force
-    }
-    $screenshotsRoot = Join-Path $packageRoot 'screenshots'
-    foreach ($name in @('overview.png', 'overview-light.png', 'app-traffic.png')) {
-        $source = Join-Path $projectRoot ('screenshots/' + $name)
-        if (Test-Path -LiteralPath $source -PathType Leaf) {
-            New-Item -ItemType Directory -Path $screenshotsRoot -Force | Out-Null
-            Copy-Item -LiteralPath $source -Destination (Join-Path $screenshotsRoot $name) -Force
-        }
-    }
-    $archive = Join-Path $distRoot ($packageName + '.zip')
-    Assert-ProjectOutput $archive
-    Compress-Archive -Path (Join-Path $packageRoot '*') -DestinationPath $archive -Force
-    $hasher = [Security.Cryptography.SHA256]::Create()
-    $archiveStream = [IO.File]::OpenRead($archive)
-    try {
-        $hash = [BitConverter]::ToString($hasher.ComputeHash($archiveStream)).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $archiveStream.Dispose()
-        $hasher.Dispose()
-    }
-    Set-Content -LiteralPath ($archive + '.sha256') -Value ($hash + '  ' + [IO.Path]::GetFileName($archive)) -Encoding Ascii
-    Write-Host "`nBuild complete." -ForegroundColor Green
+    Write-Host "`
+Build complete (version $packageVersion)." -ForegroundColor Green
     Write-Host "App: $packagedExe"
-    Write-Host "ZIP: $archive"
-    Write-Host "SHA256: $hash"
     Write-Host 'Opening this build replaces an older running build that supports hand-over. If it does not, exit that copy from its tray first.'
 } finally {
     Pop-Location

@@ -4,8 +4,8 @@ OpenNetworkMonitor runs from any folder, so installing is optional. Installing t
 
 ## Install
 
-1. Unzip the download.
-2. Open PowerShell as administrator in the unzipped folder and run:
+1. Build the app (`.\build.ps1`), or download `OpenNetworkMonitor.exe` from the release page and put it next to `scripts\install.ps1`.
+2. Open PowerShell as administrator in the `scripts` folder and run:
 
 ```powershell
 .\install.ps1
@@ -19,11 +19,11 @@ If PowerShell refuses to run the script because of its execution policy, start i
 
 Open the newer build. If an older copy is running it is asked to exit, saves its data and is replaced. A saved history from an older version is upgraded on the first start of the new one. The upgrade cannot be undone: older versions refuse a history written by a newer one, so copy `usage.db` first if you may want to go back.
 
-To update an installed copy, run `install.ps1` from the newer download again.
+To update an installed copy, run `install.ps1` again with the newer executable.
 
 ## Uninstall
 
-Exit the app from its tray icon (right-click, **Exit**), then open PowerShell as administrator and run the script from the install folder or the download:
+Exit the app from its tray icon (right-click, **Exit**), then open PowerShell as administrator and run the script from the install folder (the installer puts a copy there):
 
 ```powershell
 & "C:\Program Files\OpenNetworkMonitor\uninstall.ps1"

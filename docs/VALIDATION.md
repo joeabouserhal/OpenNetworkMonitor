@@ -4,7 +4,7 @@ The current Windows build passes formatting, strict Clippy, and 150 default auto
 
 ## Reproduce the checks
 
-Run `./build.ps1` on Windows with Rust 1.95+ MSVC and Visual Studio C++ Build Tools. The script checks formatting, runs the default tests, runs strict all-target Clippy with the UI preview enabled, builds the release, and creates a ZIP plus SHA-256 checksum under `dist/`.
+Run `./build.ps1` on Windows with Rust 1.95+ MSVC and Visual Studio C++ Build Tools. The script checks formatting, runs the default tests, runs strict all-target Clippy with the UI preview enabled, builds the release, and copies the single executable to `dist/`.
 
 The default suite covers expanded period selection, custom duration/date validation, indefinite history across cleanup/reopen, date-filtered chart/summary/CSV parity, source isolation, TCP and UDP endpoint orientation, LAN/WAN classification, adapter selection, minute rollups, saved-history restoration, a nonblocking checkpoint with an active reader, transactional retries, CSV filters and escaping, app/type aggregation, top-five ranking parity with App traffic (including loopback and unattributed bytes), smooth curves without overshoot or gap bridging, window bounds, compact layouts, themes, contrast and dropdown interactions.
 
@@ -33,4 +33,4 @@ Period menu rows use compact spacing. Month-to-date uses local calendar boundari
 
 ## Continuous integration
 
-.github/workflows/windows.yml runs `build.ps1` (formatting, tests, strict Clippy, release build and package) on a pinned Rust version, uploads the package, and runs four of the native probes in an informational step. A second job compiles with the minimum supported Rust version, and a third checks licences, registry sources and security advisories with cargo-deny using deny.toml; both are informational because they depend on external tooling that has not been exercised locally. Third-party actions are pinned to the commit of a released version. Pushing a tag such as `v0.4.0` that matches the version in Cargo.toml publishes the package and its checksum as a GitHub release. Releases are not code-signed.
+.github/workflows/windows.yml runs `build.ps1` (formatting, tests, strict Clippy and the release build) on a pinned Rust version, uploads the executable, and runs four of the native probes in an informational step. A second job compiles with the minimum supported Rust version, and a third checks licences, registry sources and security advisories with cargo-deny using deny.toml; both are informational because they depend on external tooling that has not been exercised locally. Third-party actions are pinned to the commit of a released version. Pushing a tag such as `v0.4.0` that matches the version in Cargo.toml publishes the executable as a GitHub release. Releases are not code-signed.

@@ -4,7 +4,7 @@
 Installs OpenNetworkMonitor for every user of this PC.
 
 .DESCRIPTION
-Copies the app from this folder to a protected location (Program Files by default) and
+Copies the built app to a protected location (Program Files by default) and
 adds a Start menu shortcut. Only a folder that ordinary programs cannot change is a safe
 home for an app that runs with administrator rights, and it is the only place the
 "Launch when I sign in" setting will agree to use.
@@ -14,17 +14,24 @@ Use -WhatIf to see what would happen without changing anything.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$Destination = (Join-Path $env:ProgramFiles 'OpenNetworkMonitor')
+    [string]$Destination = (Join-Path $env:ProgramFiles 'OpenNetworkMonitor'),
+    # The executable to install. By default the one next to this script, or the newest build in dist/.
+    [string]$Executable = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$source = $PSScriptRoot
-$executable = Join-Path $source 'OpenNetworkMonitor.exe'
-if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-    throw "OpenNetworkMonitor.exe was not found next to this script ($source)."
+if (-not $Executable) {
+    $Executable = Join-Path $PSScriptRoot 'OpenNetworkMonitor.exe'
+    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
+        $Executable = Join-Path $PSScriptRoot '..\dist\OpenNetworkMonitor.exe'
+    }
 }
+if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
+    throw "OpenNetworkMonitor.exe was not found. Build it first, or pass -Executable <path>."
+}
+$Executable = [IO.Path]::GetFullPath($Executable)
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -43,12 +50,8 @@ $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'OpenNetw
 
 if ($PSCmdlet.ShouldProcess($Destination, 'Copy OpenNetworkMonitor')) {
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-    foreach ($item in Get-ChildItem -LiteralPath $source -Force) {
-        # The install and uninstall scripts stay in the download; the app does not need them.
-        if ($item.Name -in @('install.ps1', 'uninstall.ps1')) { continue }
-        Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force
-    }
-    Copy-Item -LiteralPath (Join-Path $source 'uninstall.ps1') -Destination $Destination -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $Executable -Destination (Join-Path $Destination 'OpenNetworkMonitor.exe') -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination $Destination -Force
 }
 if ($PSCmdlet.ShouldProcess($shortcut, 'Create Start menu shortcut')) {
     $shell = New-Object -ComObject WScript.Shell
