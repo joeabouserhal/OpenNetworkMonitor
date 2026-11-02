@@ -253,7 +253,7 @@ impl MonitorApp {
                 .show(ui, |ui| {
                     for (path, name, value, share) in &rows {
                         let texture = self.icons.texture(ui.ctx(), path);
-                        let height = 31.0;
+                        let height = 30.0;
                         let (row, response) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), height),
                             Sense::hover(),
