@@ -102,9 +102,9 @@ fn every_page_draws_in_both_schemes_at_every_supported_size_and_scale() {
                 app.settings.ui_scale = scale;
                 let out = settle(&mut app, &ctx, size);
                 assert!(!out.shapes.is_empty(), "{page} {light} {size:?}");
-                // The sidebar never collapses, so its live speed is always there.
+                // The sidebar never collapses, so its navigation is always there.
                 assert!(
-                    texts(&out).iter().any(|(text, _)| text == "Live speed"),
+                    texts(&out).iter().any(|(text, _)| text == "Settings"),
                     "The sidebar is missing on {page} at {size:?}"
                 );
             }
@@ -395,8 +395,7 @@ fn the_end_process_dialog_asks_before_anything_happens() {
 fn find_text(out: &egui::FullOutput, label: &str) -> Pos2 {
     texts(out)
         .into_iter()
-        // The sidebar's live speed repeats the first two figures, so look in the page.
-        .find(|(text, pos)| text.starts_with(label) && pos.x > 250.0)
+        .find(|(text, _)| text.starts_with(label))
         .unwrap_or_else(|| panic!("No text starts with {label:?}"))
         .1
 }

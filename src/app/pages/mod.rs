@@ -86,58 +86,6 @@ impl MonitorApp {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let t = tk(ui.ctx());
         ui.spacing_mut().item_spacing.y = 2.0;
-        // Live speed: the window's own title bar already names the app.
-        let (down, up) = self.live_rates(Source::Adapter);
-        layout::card(ui, 12, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            let (row, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
-            text::paint(
-                ui.painter(),
-                row,
-                Align2::LEFT_CENTER,
-                "Live speed",
-                text::regular(12.0),
-                t.muted_foreground,
-            );
-            for (icon, tone, rate) in [
-                (Icon::ArrowDown, t.chart_down, self.rate(down)),
-                (Icon::ArrowUp, t.chart_up, self.rate(up)),
-            ] {
-                let (row, response) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Label,
-                        true,
-                        format!(
-                            "{} {rate}",
-                            if icon == Icon::ArrowDown {
-                                "Down"
-                            } else {
-                                "Up"
-                            }
-                        ),
-                    )
-                });
-                icon::paint(
-                    ui.painter(),
-                    icon,
-                    Pos2::new(row.left() + 7.0, row.center().y),
-                    14.0,
-                    tone,
-                );
-                text::paint(
-                    ui.painter(),
-                    Rect::from_min_max(Pos2::new(row.left() + 20.0, row.top()), row.max),
-                    Align2::LEFT_CENTER,
-                    &rate,
-                    text::semibold(14.0),
-                    t.foreground,
-                );
-            }
-        });
-        ui.add_space(20.0);
         for (index, page) in Page::ALL.into_iter().enumerate() {
             let shortcut = format!("Ctrl+{}", index + 1);
             if nav_item(
