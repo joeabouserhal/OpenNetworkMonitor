@@ -86,47 +86,57 @@ impl MonitorApp {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let t = tk(ui.ctx());
         ui.spacing_mut().item_spacing.y = 2.0;
-        // Brand.
-        let (brand, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
-        let mark = Rect::from_min_size(
-            Pos2::new(brand.left() + 2.0, brand.center().y - 16.0),
-            Vec2::splat(32.0),
-        );
-        let painter = ui.painter();
-        painter.rect_filled(mark, egui::CornerRadius::same(8), t.primary);
-        for (x, h) in [(9.0, 7.0), (14.5, 14.0), (20.0, 10.0)] {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(mark.left() + x - 1.7, mark.bottom() - 8.0 - h),
-                    Pos2::new(mark.left() + x + 1.7, mark.bottom() - 8.0),
-                ),
-                egui::CornerRadius::same(1),
-                t.primary_foreground,
+        // Live speed: the window's own title bar already names the app.
+        let (down, up) = self.live_rates(Source::Adapter);
+        layout::card(ui, 12, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let (row, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+            text::paint(
+                ui.painter(),
+                row,
+                Align2::LEFT_CENTER,
+                "Live speed",
+                text::regular(12.0),
+                t.muted_foreground,
             );
-        }
-        text::paint(
-            painter,
-            Rect::from_min_size(
-                Pos2::new(mark.right() + 10.0, brand.top() + 2.0),
-                Vec2::new(brand.width() - 44.0, 20.0),
-            ),
-            Align2::LEFT_CENTER,
-            "OpenNetworkMonitor",
-            text::semibold(14.5),
-            t.foreground,
-        );
-        text::paint(
-            painter,
-            Rect::from_min_size(
-                Pos2::new(mark.right() + 10.0, brand.top() + 20.0),
-                Vec2::new(brand.width() - 44.0, 16.0),
-            ),
-            Align2::LEFT_CENTER,
-            "Network usage",
-            text::regular(12.0),
-            t.muted_foreground,
-        );
+            for (icon, tone, rate) in [
+                (Icon::ArrowDown, t.chart_down, self.rate(down)),
+                (Icon::ArrowUp, t.chart_up, self.rate(up)),
+            ] {
+                let (row, response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Label,
+                        true,
+                        format!(
+                            "{} {rate}",
+                            if icon == Icon::ArrowDown {
+                                "Down"
+                            } else {
+                                "Up"
+                            }
+                        ),
+                    )
+                });
+                icon::paint(
+                    ui.painter(),
+                    icon,
+                    Pos2::new(row.left() + 7.0, row.center().y),
+                    14.0,
+                    tone,
+                );
+                text::paint(
+                    ui.painter(),
+                    Rect::from_min_max(Pos2::new(row.left() + 20.0, row.top()), row.max),
+                    Align2::LEFT_CENTER,
+                    &rate,
+                    text::semibold(14.0),
+                    t.foreground,
+                );
+            }
+        });
         ui.add_space(20.0);
         for (index, page) in Page::ALL.into_iter().enumerate() {
             let shortcut = format!("Ctrl+{}", index + 1);
