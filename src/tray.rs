@@ -2,7 +2,7 @@ use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicIsize, Ordering},
     },
     time::Duration,
@@ -20,9 +20,6 @@ pub struct Tray {
     pub paused: Arc<AtomicBool>,
     /// Set by the menu; the window takes it, goes to Settings and clears it.
     pub open_settings: Arc<AtomicBool>,
-    /// Where on the screen, in physical pixels, the icon was right-clicked. The window
-    /// takes it and shows its own menu there.
-    menu_at: Arc<Mutex<Option<(f64, f64)>>>,
     last_tooltip: std::cell::RefCell<String>,
 }
 pub fn icon_pixels() -> Vec<u8> {
@@ -34,25 +31,46 @@ impl Tray {
         let exit = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let open_settings = Arc::new(AtomicBool::new(false));
-        let menu_at = Arc::new(Mutex::new(None));
-        let (icon_exit, icon_menu) = (exit.clone(), menu_at.clone());
+        let (icon_exit, icon_paused) = (exit.clone(), paused.clone());
+        let (menu_exit, menu_paused, menu_settings, menu_ctx) = (
+            exit.clone(),
+            paused.clone(),
+            open_settings.clone(),
+            ctx.clone(),
+        );
+        crate::tray_menu::set_handler(move |action| {
+            use crate::tray_menu::Action;
+            match action {
+                Action::Open => show_window(&menu_ctx, &menu_exit),
+                Action::Settings => {
+                    menu_settings.store(true, Ordering::Release);
+                    show_window(&menu_ctx, &menu_exit);
+                }
+                // The window sees the change and tells the worker.
+                Action::TogglePause => {
+                    menu_paused.fetch_xor(true, Ordering::AcqRel);
+                }
+                Action::Exit => request_exit(&menu_ctx, &menu_exit),
+            }
+            menu_ctx.request_repaint();
+        });
         TrayIconEvent::set_event_handler(Some(move |event| match event {
             TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
             } => show_window(&ctx, &icon_exit),
-            // The menu is drawn by the app itself, so the click only says where.
+            // The menu is a small window of its own, placed where the click was.
             TrayIconEvent::Click {
                 button: MouseButton::Right,
                 button_state: MouseButtonState::Up,
                 position,
                 ..
             } => {
-                if let Ok(mut at) = icon_menu.lock() {
-                    *at = Some((position.x, position.y));
-                }
-                ctx.request_repaint();
+                crate::tray_menu::open(
+                    (position.x, position.y),
+                    icon_paused.load(Ordering::Acquire),
+                );
             }
             _ => {}
         }));
@@ -66,22 +84,8 @@ impl Tray {
             exit,
             paused,
             open_settings,
-            menu_at,
             last_tooltip: std::cell::RefCell::new(String::new()),
         })
-    }
-    /// Where the icon was right-clicked since this was last called.
-    pub fn take_menu_request(&self) -> Option<(f64, f64)> {
-        self.menu_at.lock().ok().and_then(|mut at| at.take())
-    }
-    /// Brings the main window forward, as a left click on the icon does.
-    pub fn open(&self, ctx: &egui::Context) {
-        show_window(ctx, &self.exit);
-    }
-    /// Saves and exits, as the menu's Exit does.
-    pub fn quit(&self, ctx: &egui::Context) {
-        request_exit(ctx, &self.exit);
-        ctx.request_repaint();
     }
     /// Shows `text` when the pointer rests on the tray icon. Unchanged text is not
     /// sent to Windows again.

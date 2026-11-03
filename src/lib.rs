@@ -11,6 +11,7 @@ pub mod store;
 pub mod titlebar;
 pub mod traffic;
 pub mod tray;
+pub mod tray_menu;
 pub mod ui;
 pub mod window_state;
 pub mod worker;

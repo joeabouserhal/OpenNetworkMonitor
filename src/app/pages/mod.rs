@@ -16,8 +16,6 @@ mod dialogs;
 mod overview;
 mod settings;
 mod toolbar;
-mod tray_menu;
-pub(super) use tray_menu::TrayMenu;
 
 pub const NAV_WIDTH: f32 = 232.0;
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1440.0, 820.0];
