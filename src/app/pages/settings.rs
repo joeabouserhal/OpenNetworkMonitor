@@ -270,10 +270,11 @@ impl MonitorApp {
             |ui| {
                 self.startup.poll();
                 let mut enabled = self.startup.enabled;
-                // An unprotected copy may still turn startup off, never on.
+                // An unprotected copy may turn startup off, and on only once the user accepts the risk.
+                let accepted = self.settings.accept_startup_risk;
                 let usable = self.startup.available
                     && !self.startup.busy
-                    && (self.startup.enabled || self.startup.location_risk.is_none());
+                    && (self.startup.enabled || self.startup.location_risk.is_none() || accepted);
                 row(
                     ui,
                     "Launch when I sign in to Windows",
@@ -288,7 +289,7 @@ impl MonitorApp {
                             )
                             .changed()
                             {
-                                self.startup.set_enabled(enabled);
+                                self.startup.set_enabled(enabled, accepted);
                             }
                         });
                     },
@@ -297,20 +298,50 @@ impl MonitorApp {
                     block(ui, |ui| note(ui, "Updating startup settings…"));
                 }
                 if let Some(risk) = self.startup.location_risk.clone() {
-                    let advice = if self.startup.enabled {
-                        "Startup runs with administrator rights, so anything that can change this copy could run elevated. Turn it off, or move the app to Program Files."
+                    let advice = if accepted {
+                        "You accepted the risk: anything that can change this copy could run elevated at sign-in."
                     } else {
-                        "Startup runs with administrator rights, so the app has to live in a protected folder such as Program Files."
+                        "Startup runs with administrator rights, so anything that can change this copy could run elevated. Move the app to Program Files, or accept the risk below."
                     };
                     block(ui, |ui| {
                         controls::alert(
                             ui,
-                            AlertVariant::Destructive,
+                            if accepted {
+                                AlertVariant::Default
+                            } else {
+                                AlertVariant::Destructive
+                            },
                             Icon::Alert,
                             "This copy is in an unprotected folder",
                             &format!("{advice} {risk}"),
                             false,
                         );
+                        let t = tk(ui.ctx());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            let label = "I understand the risk and want startup from this folder";
+                            let boxed = controls::checkbox(
+                                ui,
+                                &mut self.settings.accept_startup_risk,
+                                label,
+                            )
+                            .changed();
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 16.0),
+                                Sense::click(),
+                            );
+                            text::paint(
+                                ui.painter(),
+                                rect,
+                                Align2::LEFT_CENTER,
+                                label,
+                                text::regular(13.5),
+                                t.foreground,
+                            );
+                            if response.clicked() && !boxed {
+                                self.settings.accept_startup_risk ^= true;
+                            }
+                        });
                     });
                 }
                 if self.startup.enabled && self.startup.different_copy {
@@ -327,7 +358,7 @@ impl MonitorApp {
                                 .show(ui)
                                 .clicked()
                             {
-                                self.startup.set_enabled(true);
+                                self.startup.set_enabled(true, accepted);
                             }
                         },
                     );

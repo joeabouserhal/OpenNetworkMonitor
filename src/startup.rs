@@ -31,7 +31,9 @@ pub struct Status {
 
 /// UI state is refreshed from Windows, rather than trusting a saved checkbox.
 pub struct Controller {
-    tx: Option<mpsc::Sender<bool>>,
+    /// What to do (turn startup on or off) and whether the user has accepted the risk of an
+    /// unprotected folder.
+    tx: Option<mpsc::Sender<(bool, bool)>>,
     rx: Option<mpsc::Receiver<Result<Status>>>,
     pub enabled: bool,
     pub busy: bool,
@@ -58,8 +60,8 @@ impl Controller {
                 };
                 let _ = results.send(status(&exe));
                 ctx.request_repaint();
-                while let Ok(enabled) = commands.recv() {
-                    let result = set_enabled(enabled, &exe).and_then(|()| status(&exe));
+                while let Ok((enabled, accepted)) = commands.recv() {
+                    let result = set_enabled(enabled, accepted, &exe).and_then(|()| status(&exe));
                     let _ = results.send(result);
                     ctx.request_repaint();
                 }
@@ -105,9 +107,10 @@ impl Controller {
             }
         }
     }
-    pub fn set_enabled(&mut self, enabled: bool) {
+    /// `accepted` is the user's choice to run elevated from a folder others can change.
+    pub fn set_enabled(&mut self, enabled: bool, accepted: bool) {
         if let Some(tx) = &self.tx {
-            if tx.send(enabled).is_ok() {
+            if tx.send((enabled, accepted)).is_ok() {
                 self.busy = true;
                 self.error.clear();
             } else {
@@ -212,7 +215,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
     };
     normalize(a) == normalize(b)
 }
-fn set_enabled(enabled: bool, exe: &Path) -> Result<()> {
+fn set_enabled(enabled: bool, accepted: bool, exe: &Path) -> Result<()> {
     ensure!(
         exe.is_absolute() && exe.is_file(),
         "The current executable is unavailable."
@@ -226,7 +229,7 @@ fn set_enabled(enabled: bool, exe: &Path) -> Result<()> {
             }
             return Ok(());
         }
-        if let Some(risk) = location::risk(exe) {
+        if let Some(risk) = location::risk(exe).filter(|_| !accepted) {
             bail!(
                 "Start at sign-in needs this app in a protected folder such as Program Files. {}",
                 risk.replace('\n', " ")

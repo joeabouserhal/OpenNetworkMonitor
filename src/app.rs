@@ -62,6 +62,9 @@ struct Settings {
     base_color: BaseColor,
     filter: Filter,
     close_to_tray: bool,
+    /// The user accepts launching at sign-in with administrator rights from a folder that
+    /// non-administrators can change.
+    accept_startup_risk: bool,
     geo: Option<PathBuf>,
     bits: bool,
     ui_scale: f32,
@@ -119,6 +122,7 @@ impl Default for Settings {
             base_color: BaseColor::Zinc,
             filter: Filter::default(),
             close_to_tray: true,
+            accept_startup_risk: false,
             geo: None,
             bits: false,
             ui_scale: DEFAULT_UI_SCALE,
