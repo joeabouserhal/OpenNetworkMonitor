@@ -1,13 +1,23 @@
 /// Shared artwork for the window, tray, and executable resource. This file is also compiled by
 /// build.rs, so it depends on nothing but the standard library.
 ///
-/// The icon is the sidebar's mark without its tile: three rounded bars that fill the whole icon
-/// so they read as large as any other app's icon in the taskbar, the middle one in the download
-/// blue.
+/// The icon is the sidebar's mark: a dark zinc tile with no border, so it reads on light and dark
+/// taskbars alike, and three large rounded bars, the middle one in the download blue.
 const BARS: [(f64, f64, f64, f64); 3] = [
+    (4.4, 16.0, 10.6, 28.0),
+    (12.9, 4.0, 19.1, 28.0),
+    (21.4, 11.0, 27.6, 28.0),
+];
+/// The bars alone fill the whole icon, for the tray's single-colour styles.
+const GLYPH: [(f64, f64, f64, f64); 3] = [
     (1.0, 16.0, 9.0, 31.0),
     (12.0, 1.0, 20.0, 31.0),
     (23.0, 9.0, 31.0, 31.0),
+];
+const BACKGROUND: [f64; 3] = [
+    0x18 as f64 / 255.0,
+    0x18 as f64 / 255.0,
+    0x1b as f64 / 255.0,
 ];
 const WHITE: [f64; 3] = [
     0xfa as f64 / 255.0,
@@ -27,9 +37,13 @@ fn distance(x: f64, y: f64, centre: (f64, f64), half: (f64, f64), radius: f64) -
     dx.hypot(dy) - radius
 }
 
-/// The colour at a point of the 32-unit artwork, or `None` between the bars.
+/// The colour at a point of the 32-unit artwork, or `None` outside the tile.
 fn shade(x: f64, y: f64) -> Option<[f64; 3]> {
-    BARS.iter()
+    if distance(x, y, (16.0, 16.0), (16.0, 16.0), 7.0) > 0.0 {
+        return None;
+    }
+    let bar = BARS
+        .iter()
         .enumerate()
         .find_map(|(index, &(x0, y0, x1, y1))| {
             let bar = distance(
@@ -37,13 +51,14 @@ fn shade(x: f64, y: f64) -> Option<[f64; 3]> {
                 y,
                 ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
                 ((x1 - x0) / 2.0, (y1 - y0) / 2.0),
-                2.4,
+                2.2,
             );
             (bar <= 0.0).then_some(if index == 1 { BLUE } else { WHITE })
-        })
+        });
+    Some(bar.unwrap_or(BACKGROUND))
 }
 
-/// The full icon: the three bars, smooth at any size.
+/// The full icon: the tile with its bars, smooth at any size.
 pub fn pixels(size: u32) -> Vec<u8> {
     const SAMPLES: u32 = 4;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
@@ -79,7 +94,7 @@ pub fn pixels(size: u32) -> Vec<u8> {
     rgba
 }
 
-/// Only the three bars, in one colour, for the tray icon's accent and monochrome styles.
+/// Only the three bars, filling the icon, in one colour, for the tray icon's accent and monochrome styles.
 /// The build script needs just `pixels`, hence the allowance.
 #[allow(dead_code)]
 pub fn tinted(size: u32, [red, green, blue]: [u8; 3]) -> Vec<u8> {
@@ -89,7 +104,7 @@ pub fn tinted(size: u32, [red, green, blue]: [u8; 3]) -> Vec<u8> {
         for x in 0..size {
             let left = f64::from(x);
             let top = f64::from(y);
-            let coverage: f64 = BARS
+            let coverage: f64 = GLYPH
                 .iter()
                 .map(|&(x0, y0, x1, y1)| {
                     let width = ((left + 1.0).min(x1 * scale) - left.max(x0 * scale)).max(0.0);
@@ -122,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_is_three_large_bars_with_nothing_behind_them_at_every_size() {
+    fn the_icon_is_a_borderless_dark_tile_with_three_large_bars_at_every_size() {
         for size in [16, 32, 48, 256] {
             let icon = pixels(size);
             assert_eq!(icon.len(), (size * size * 4) as usize);
@@ -134,21 +149,21 @@ mod tests {
                     (y / 32.0 * f64::from(size)) as u32,
                 )
             };
-            assert_eq!(at(0.0, 0.0)[3], 0, "{size}: no tile behind the bars");
-            assert_eq!(at(10.5, 8.0)[3], 0, "{size}: the gap between bars is clear");
-            assert!(at(5.0, 24.0)[0] > 200, "{size}: the first bar is light");
+            assert_eq!(at(0.0, 0.0)[3], 0, "{size}: the corner is clear");
+            let edge = at(16.0, 31.0);
+            assert_eq!(edge[3], 255, "{size}: the tile reaches the edge");
+            assert_eq!(edge[..3], [0x18, 0x18, 0x1b], "{size}: with no border");
+            assert!(at(7.5, 24.0)[0] > 200, "{size}: the first bar is light");
             let middle = at(16.0, 16.0);
             assert!(
                 middle[2] > 200 && middle[0] < 100,
                 "{size}: the middle bar is blue"
             );
-            // The tallest bar runs the full height, so the icon fills its space.
-            assert_eq!(
-                at(16.0, 2.5)[3],
-                255,
-                "{size}: the middle bar reaches the top"
-            );
-            assert_eq!(at(16.0, 29.5)[3], 255, "{size}: and the bottom");
+            assert_eq!(at(16.0, 5.5)[2], 0xf6, "{size}: the middle bar is tall");
+            if size >= 32 {
+                // At 16 px the gap is barely a pixel wide, so it blends with its bars.
+                assert!(at(11.75, 24.0)[0] < 60, "{size}: the gap shows the tile");
+            }
         }
     }
 
