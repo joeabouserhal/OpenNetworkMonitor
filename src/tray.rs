@@ -160,7 +160,7 @@ pub fn taskbar_is_dark() -> bool {
 /// The main window, for the wake-ups below. Zero until `remember_window` is called.
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
-/// Gives the window's small icon, the one in its title bar, just the three bars in the colour
+/// Gives the window's small icon, the one in its title bar, just the three bars in one colour
 /// that shows on the title bar, while the taskbar keeps the full tile.
 pub fn set_caption_icon(dark_title_bar: bool) {
     static ICONS: std::sync::Mutex<[isize; 2]> = std::sync::Mutex::new([0; 2]);

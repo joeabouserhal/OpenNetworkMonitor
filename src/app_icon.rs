@@ -64,25 +64,22 @@ pub fn pixels(size: u32) -> Vec<u8> {
     render(size, shade)
 }
 
-/// The bars alone on a clear background, with `outer` for the two outside bars, for the small
-/// icon in the window's title bar. It is for the bar's own colour, light or dark.
+/// The bars alone on a clear background, all in `color`, for the small icon in the window's
+/// title bar.
 #[allow(dead_code)]
-pub fn mark(size: u32, outer: [u8; 3]) -> Vec<u8> {
-    let outer = outer.map(|channel| f64::from(channel) / 255.0);
+pub fn mark(size: u32, color: [u8; 3]) -> Vec<u8> {
+    let color = color.map(|channel| f64::from(channel) / 255.0);
     render(size, |x, y| {
-        GLYPH
-            .iter()
-            .enumerate()
-            .find_map(|(index, &(x0, y0, x1, y1))| {
-                let bar = distance(
-                    x,
-                    y,
-                    ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
-                    ((x1 - x0) / 2.0, (y1 - y0) / 2.0),
-                    2.4,
-                );
-                (bar <= 0.0).then_some(if index == 1 { BLUE } else { outer })
-            })
+        GLYPH.iter().find_map(|&(x0, y0, x1, y1)| {
+            let bar = distance(
+                x,
+                y,
+                ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+                ((x1 - x0) / 2.0, (y1 - y0) / 2.0),
+                2.4,
+            );
+            (bar <= 0.0).then_some(color)
+        })
     })
 }
 
