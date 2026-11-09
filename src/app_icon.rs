@@ -1,7 +1,7 @@
 /// Shared artwork for the window, tray, and executable resource. This file is also compiled by
 /// build.rs, so it depends on nothing but the standard library.
 ///
-/// The icon is the sidebar's mark: a dark zinc tile with no border, so it reads on light and dark
+/// The icon is the sidebar's mark: a tile in the app's dark background colour with no border, so it reads on light and dark
 /// taskbars alike, and three large rounded bars, the middle one in the download blue.
 const BARS: [(f64, f64, f64, f64); 3] = [
     (4.4, 16.0, 10.6, 28.0),
@@ -14,10 +14,11 @@ const GLYPH: [(f64, f64, f64, f64); 3] = [
     (12.0, 1.0, 20.0, 31.0),
     (23.0, 9.0, 31.0, 31.0),
 ];
+/// The app's dark background.
 const BACKGROUND: [f64; 3] = [
-    0x18 as f64 / 255.0,
-    0x18 as f64 / 255.0,
-    0x1b as f64 / 255.0,
+    0x09 as f64 / 255.0,
+    0x09 as f64 / 255.0,
+    0x0b as f64 / 255.0,
 ];
 const WHITE: [f64; 3] = [
     0xfa as f64 / 255.0,
@@ -152,7 +153,7 @@ mod tests {
             assert_eq!(at(0.0, 0.0)[3], 0, "{size}: the corner is clear");
             let edge = at(16.0, 31.0);
             assert_eq!(edge[3], 255, "{size}: the tile reaches the edge");
-            assert_eq!(edge[..3], [0x18, 0x18, 0x1b], "{size}: with no border");
+            assert_eq!(edge[..3], [0x09, 0x09, 0x0b], "{size}: with no border");
             assert!(at(7.5, 24.0)[0] > 200, "{size}: the first bar is light");
             let middle = at(16.0, 16.0);
             assert!(
