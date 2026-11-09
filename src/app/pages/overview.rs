@@ -72,7 +72,11 @@ impl MonitorApp {
                 icon: Icon::Overview,
                 label: "Total usage".into(),
                 value: format_bytes(total as f64),
-                note: format!("Over {}", self.period_phrase()),
+                note: format!(
+                    "↓ {}  ↑ {}",
+                    format_bytes(history.down as f64),
+                    format_bytes(history.up as f64)
+                ),
                 tone: t.muted_foreground,
                 meter: None,
             },
