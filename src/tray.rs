@@ -12,7 +12,7 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, WPARAM},
     Graphics::Gdi::CreateBitmap,
     UI::WindowsAndMessaging::{
-        CreateIconIndirect, ICON_SMALL, ICONINFO, IsWindow, PostMessageW, SendMessageW,
+        CreateIconIndirect, ICON_SMALL, ICONINFO, IsWindow, PostMessageW, SendMessageW, WM_GETICON,
         WM_MOUSEMOVE, WM_SETICON,
     },
 };
@@ -161,7 +161,7 @@ pub fn taskbar_is_dark() -> bool {
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 /// Gives the window's small icon, the one in its title bar, just the three bars in one colour
-/// that shows on the title bar, while the taskbar keeps the full tile.
+/// that shows on the title bar, while the taskbar keeps the full tile. Cheap to call every frame.
 pub fn set_caption_icon(dark_title_bar: bool) {
     static ICONS: std::sync::Mutex<[isize; 2]> = std::sync::Mutex::new([0; 2]);
     let hwnd = MAIN_WINDOW.load(Ordering::Acquire);
@@ -200,8 +200,12 @@ pub fn set_caption_icon(dark_title_bar: bool) {
         };
         icons[slot] = icon as isize;
     }
-    if icons[slot] != 0 {
-        // SAFETY: the handles are the main window and an icon created above, both still alive.
+    // The window setup can put its own icon back after this has run, so it is checked every frame
+    // and only sent again when it differs.
+    // SAFETY: the handles are the main window and an icon created above, both still alive.
+    let current = unsafe { SendMessageW(hwnd as HWND, WM_GETICON, ICON_SMALL as WPARAM, 0) };
+    if icons[slot] != 0 && current != icons[slot] {
+        // SAFETY: as above.
         unsafe {
             SendMessageW(
                 hwnd as HWND,

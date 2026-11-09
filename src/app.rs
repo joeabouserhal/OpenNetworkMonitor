@@ -753,9 +753,9 @@ impl eframe::App for MonitorApp {
             self.applied = tokens;
             root.ctx().request_repaint();
         }
+        crate::tray::set_caption_icon(tokens.is_dark());
         if self.titlebar != Some(tokens) {
             crate::tray_menu::set_palette(crate::tray_menu::Palette::from_tokens(&tokens));
-            crate::tray::set_caption_icon(tokens.is_dark());
             crate::titlebar::apply(&*frame, crate::titlebar::Colors::from_tokens(&tokens));
             self.titlebar = Some(tokens);
         }
