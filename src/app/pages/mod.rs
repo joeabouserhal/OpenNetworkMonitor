@@ -418,8 +418,19 @@ fn nav_item(
     if response.has_focus() {
         crate::ui::focus_ring(painter, ui.ctx(), rect, egui::CornerRadius::same(8), &t);
     }
+    // The page you are on carries the accent: a bar at the edge and a coloured icon.
+    if active {
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(rect.left(), rect.top() + 8.0),
+                Pos2::new(rect.left() + 3.0, rect.bottom() - 8.0),
+            ),
+            egui::CornerRadius::same(2),
+            t.accent_ink,
+        );
+    }
     let ink = if active {
-        t.foreground
+        t.accent_ink
     } else {
         t.muted_foreground
     };

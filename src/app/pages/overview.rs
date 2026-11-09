@@ -77,7 +77,7 @@ impl MonitorApp {
                     format_bytes(history.down as f64),
                     format_bytes(history.up as f64)
                 ),
-                tone: t.muted_foreground,
+                tone: t.accent_ink,
                 meter: None,
             },
         ];
@@ -106,7 +106,7 @@ impl MonitorApp {
                 label: "Connections".into(),
                 value: format!("{} open", self.data.snapshot.connections.len()),
                 note: format!("{} adapters", self.data.snapshot.adapters.len()),
-                tone: t.muted_foreground,
+                tone: t.accent_ink,
                 meter: None,
             });
         }

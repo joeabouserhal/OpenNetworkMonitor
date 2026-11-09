@@ -330,6 +330,19 @@ mod render_tests {
             ("overview", "overview", false, wide, vec![], |_| {}),
             ("overview-light", "overview", true, wide, vec![], |_| {}),
             ("overview-small", "overview", false, small, vec![], |_| {}),
+            ("overview-violet", "overview", false, wide, vec![], |app| {
+                app.settings.base_color = BaseColor::Violet;
+            }),
+            (
+                "overview-green-light",
+                "overview",
+                true,
+                wide,
+                vec![],
+                |app| {
+                    app.settings.base_color = BaseColor::Green;
+                },
+            ),
             ("overview-recent", "overview", false, wide, vec![], |app| {
                 app.top_apps_view = TopAppsView::Recent;
             }),
@@ -427,6 +440,8 @@ mod render_tests {
             let ctx = egui::Context::default();
             let mut app = MonitorApp::preview(&ctx, page, light);
             setup(&mut app);
+            // A scene may change the accent colour, so apply the settings' tokens again.
+            crate::ui::tokens::install(&ctx, app.settings.tokens(&ctx));
             let scale = app.settings.ui_scale;
             scene::export_in(&ctx, name, size, scale, &steps, |ui| {
                 app.refresh_preview();

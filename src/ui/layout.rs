@@ -125,7 +125,11 @@ pub fn tabs<T: Copy + PartialEq>(
             painter.rect_filled(
                 cell,
                 corner(RADIUS - 2.0),
-                if t.is_dark() { t.input } else { t.background },
+                if t.is_dark() {
+                    t.input.lerp_to_gamma(t.accent, 0.5)
+                } else {
+                    t.background
+                },
             );
             if !t.is_dark() {
                 painter.rect_stroke(
@@ -145,7 +149,9 @@ pub fn tabs<T: Copy + PartialEq>(
             Align2::CENTER_CENTER,
             label,
             font.clone(),
-            if active || response.hovered() {
+            if active {
+                t.accent_ink
+            } else if response.hovered() {
                 t.foreground
             } else {
                 t.muted_foreground
@@ -523,10 +529,10 @@ pub fn row_border(ui: &Ui, rect: Rect) {
 pub fn row_hover(ui: &Ui, rect: Rect, response: &Response, selected: bool) {
     let t = tk(ui.ctx());
     if selected {
-        ui.painter().rect_filled(rect, 0.0, t.muted);
+        ui.painter().rect_filled(rect, 0.0, t.accent);
     } else if response.hovered() {
         ui.painter()
-            .rect_filled(rect, 0.0, t.muted.gamma_multiply(0.5));
+            .rect_filled(rect, 0.0, t.accent.gamma_multiply(0.5));
     }
 }
 

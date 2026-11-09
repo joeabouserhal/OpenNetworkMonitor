@@ -111,7 +111,12 @@ pub struct Tokens {
     pub secondary: Color32,
     pub muted: Color32,
     pub muted_foreground: Color32,
+    /// Hover and selected backgrounds. They take a little of the accent colour, so choosing one
+    /// shows all over the interface; the neutral bases stay gray.
     pub accent: Color32,
+    /// The accent colour for text and icons that must stay readable: the base colour itself, or
+    /// the foreground for the neutral bases, whose colour is only gray.
+    pub accent_ink: Color32,
     pub destructive: Color32,
     pub border: Color32,
     pub input: Color32,
@@ -143,6 +148,15 @@ impl Tokens {
             (_, Scheme::Dark) => rgb(0xfb923c),
         };
         let common = |ring: Color32| (primary, base.primary_foreground(scheme), ring);
+        let neutral = matches!(base, BaseColor::Zinc | BaseColor::Slate | BaseColor::Stone);
+        // How much of the accent the hover and selected backgrounds take.
+        let tinted = |hover: Color32| {
+            if neutral {
+                hover
+            } else {
+                hover.lerp_to_gamma(primary, 0.16)
+            }
+        };
         match scheme {
             Scheme::Light => {
                 let (primary, primary_foreground, ring) = common(primary.gamma_multiply(0.45));
@@ -158,7 +172,8 @@ impl Tokens {
                     secondary: rgb(0xf4f4f5),
                     muted: rgb(0xf4f4f5),
                     muted_foreground: rgb(0x71717a),
-                    accent: rgb(0xf4f4f5),
+                    accent: tinted(rgb(0xf4f4f5)),
+                    accent_ink: if neutral { rgb(0x09090b) } else { chart_down },
                     destructive: rgb(0xdc2626),
                     border: rgb(0xe4e4e7),
                     input: rgb(0xe4e4e7),
@@ -183,7 +198,8 @@ impl Tokens {
                     secondary: rgb(0x27272a),
                     muted: rgb(0x27272a),
                     muted_foreground: rgb(0xa1a1aa),
-                    accent: rgb(0x27272a),
+                    accent: tinted(rgb(0x27272a)),
+                    accent_ink: if neutral { rgb(0xfafafa) } else { chart_down },
                     destructive: rgb(0xf87171),
                     border: alpha(0xffffff, 26),
                     input: alpha(0xffffff, 38),
