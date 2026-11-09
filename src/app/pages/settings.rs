@@ -179,6 +179,27 @@ impl MonitorApp {
                     }
                 },
             );
+            row(
+                ui,
+                "Tray icon",
+                "The colour of the icon beside the clock. Monochrome is white on a dark taskbar and gray on a light one.",
+                300.0,
+                |ui| {
+                    let mut style = self.settings.tray_icon;
+                    if tabs(
+                        ui,
+                        "tray-icon",
+                        &mut style,
+                        &[
+                            (TrayIconStyle::Default, "Default"),
+                            (TrayIconStyle::Accent, "Accent"),
+                            (TrayIconStyle::Monochrome, "Monochrome"),
+                        ],
+                    ) {
+                        self.settings.tray_icon = style;
+                    }
+                },
+            );
             block(ui, |ui| {
                 let (label, _) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());

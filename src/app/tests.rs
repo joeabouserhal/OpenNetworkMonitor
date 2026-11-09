@@ -535,3 +535,25 @@ fn visible_texts(out: &egui::FullOutput) -> Vec<(String, Pos2)> {
     }
     all
 }
+
+#[test]
+fn the_tray_icon_colour_follows_the_chosen_style_and_the_taskbar() {
+    let ctx = egui::Context::default();
+    let mut app = MonitorApp::preview(&ctx, "overview", false);
+    assert_eq!(
+        app.settings.tray_icon_color(true),
+        None,
+        "default keeps its own colour"
+    );
+    app.settings.tray_icon = TrayIconStyle::Monochrome;
+    assert_eq!(app.settings.tray_icon_color(true), Some([255, 255, 255]));
+    assert_eq!(app.settings.tray_icon_color(false), Some([63, 63, 70]));
+    app.settings.tray_icon = TrayIconStyle::Accent;
+    app.settings.base_color = BaseColor::Blue;
+    let on_dark = app.settings.tray_icon_color(true).unwrap();
+    let on_light = app.settings.tray_icon_color(false).unwrap();
+    assert_ne!(
+        on_dark, on_light,
+        "each taskbar gets the shade that shows on it"
+    );
+}

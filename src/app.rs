@@ -43,6 +43,18 @@ enum LegacyTheme {
     Mocha,
 }
 
+/// The colour of the tray icon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum TrayIconStyle {
+    /// The app's own teal.
+    #[default]
+    Default,
+    /// The accent colour chosen for the app.
+    Accent,
+    /// White on a dark taskbar, dark gray on a light one.
+    Monochrome,
+}
+
 /// Light, dark, or whichever Windows is using.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum Appearance {
@@ -65,6 +77,7 @@ struct Settings {
     /// The user accepts launching at sign-in with administrator rights from a folder that
     /// non-administrators can change.
     accept_startup_risk: bool,
+    tray_icon: TrayIconStyle,
     geo: Option<PathBuf>,
     bits: bool,
     ui_scale: f32,
@@ -99,6 +112,27 @@ impl Settings {
             Appearance::Dark
         })
     }
+    /// The tray icon's colour, or `None` for its own. The taskbar's theme decides what is
+    /// visible, which can differ from the app's when the app is set to a fixed theme.
+    fn tray_icon_color(&self, taskbar_dark: bool) -> Option<[u8; 3]> {
+        match self.tray_icon {
+            TrayIconStyle::Default => None,
+            TrayIconStyle::Accent => {
+                let scheme = if taskbar_dark {
+                    Scheme::Dark
+                } else {
+                    Scheme::Light
+                };
+                let color = self.base_color.primary(scheme);
+                Some([color.r(), color.g(), color.b()])
+            }
+            TrayIconStyle::Monochrome => Some(if taskbar_dark {
+                [255, 255, 255]
+            } else {
+                [63, 63, 70]
+            }),
+        }
+    }
     /// The colour scheme to draw with now.
     fn scheme(&self, ctx: &egui::Context) -> Scheme {
         match self.appearance() {
@@ -123,6 +157,7 @@ impl Default for Settings {
             filter: Filter::default(),
             close_to_tray: true,
             accept_startup_risk: false,
+            tray_icon: TrayIconStyle::Default,
             geo: None,
             bits: false,
             ui_scale: DEFAULT_UI_SCALE,
@@ -242,6 +277,8 @@ pub struct MonitorApp {
     pause_sent: bool,
     /// The last time the tray tooltip was refreshed, by snapshot.
     tooltip_revision: u64,
+    /// Whether the taskbar is dark, read from Windows about once a second.
+    taskbar_dark: bool,
     /// The message in the banner and when this window first showed it.
     notice_seen: Option<(String, Instant)>,
     /// The alert choices the worker was last given.
@@ -352,6 +389,7 @@ impl MonitorApp {
             min_size_for: None,
             pause_sent: false,
             tooltip_revision: 0,
+            taskbar_dark: true,
             cap_input,
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,
@@ -671,8 +709,10 @@ impl eframe::App for MonitorApp {
             }
             if self.tooltip_revision != self.data.revision {
                 self.tooltip_revision = self.data.revision;
+                self.taskbar_dark = crate::tray::taskbar_is_dark();
                 tray.set_tooltip(&self.tray_tooltip());
             }
+            tray.set_color(self.settings.tray_icon_color(self.taskbar_dark));
         }
         let alerts = self.settings.alert_config();
         if alerts != self.alerts_sent {

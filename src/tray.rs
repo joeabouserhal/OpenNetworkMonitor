@@ -21,6 +21,8 @@ pub struct Tray {
     /// Set by the menu; the window takes it, goes to Settings and clears it.
     pub open_settings: Arc<AtomicBool>,
     last_tooltip: std::cell::RefCell<String>,
+    last_color: std::cell::Cell<Option<[u8; 3]>>,
+    last_color_set: std::cell::Cell<bool>,
 }
 pub fn icon_pixels() -> Vec<u8> {
     crate::app_icon::pixels(32)
@@ -85,7 +87,25 @@ impl Tray {
             paused,
             open_settings,
             last_tooltip: std::cell::RefCell::new(String::new()),
+            last_color: std::cell::Cell::new(None),
+            last_color_set: std::cell::Cell::new(false),
         })
+    }
+    /// Draws the icon in `color`, or in its own colours when that is `None`. Unchanged colours
+    /// are not sent to Windows again.
+    pub fn set_color(&self, color: Option<[u8; 3]>) {
+        if self.last_color.get() == color && self.last_color_set.get() {
+            return;
+        }
+        let pixels = match color {
+            Some(rgb) => crate::app_icon::tinted(32, rgb),
+            None => icon_pixels(),
+        };
+        if let Ok(icon) = tray_icon::Icon::from_rgba(pixels, 32, 32) {
+            let _ = self.icon.set_icon(Some(icon));
+            self.last_color.set(color);
+            self.last_color_set.set(true);
+        }
     }
     /// Shows `text` when the pointer rests on the tray icon. Unchanged text is not
     /// sent to Windows again.
@@ -96,6 +116,39 @@ impl Tray {
         }
     }
 }
+/// Whether the Windows taskbar, where the tray icon sits, is using its dark theme.
+pub fn taskbar_is_dark() -> bool {
+    use windows_sys::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+    };
+    let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let value: Vec<u16> = "SystemUsesLightTheme"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut light = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: reads one DWORD into a u32 with its byte size; both names are nul-terminated and
+    // outlive the call, and nothing is written to the registry.
+    let code = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&raw mut light).cast(),
+            &mut size,
+        )
+    };
+    // Dark is Windows' default when the setting is missing.
+    code != ERROR_SUCCESS || light == 0
+}
+
 /// The main window, for the wake-ups below. Zero until `remember_window` is called.
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 

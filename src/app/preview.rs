@@ -68,6 +68,7 @@ impl MonitorApp {
             min_size_for: None,
             pause_sent: false,
             tooltip_revision: 0,
+            taskbar_dark: true,
             cap_input: "100".into(),
             breakdown_cache: Arc::default(),
             breakdown_cache_key: None,

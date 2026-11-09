@@ -1,6 +1,11 @@
 /// Shared artwork for the window, tray, and executable resource.
 /// At 32px this preserves the original runtime icon pixel for pixel.
 pub fn pixels(size: u32) -> Vec<u8> {
+    tinted(size, [76, 199, 190])
+}
+
+/// The same artwork in another colour.
+pub fn tinted(size: u32, [red, green, blue]: [u8; 3]) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let scale = f64::from(size) / 32.0;
     let bars = [
@@ -23,9 +28,28 @@ pub fn pixels(size: u32) -> Vec<u8> {
             let alpha = (coverage.min(1.0) * 255.0).round() as u8;
             if alpha > 0 {
                 let index = ((y * size + x) * 4) as usize;
-                rgba[index..index + 4].copy_from_slice(&[76, 199, 190, alpha]);
+                rgba[index..index + 4].copy_from_slice(&[red, green, blue, alpha]);
             }
         }
     }
     rgba
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_artwork_keeps_its_shape_in_any_colour() {
+        let teal = pixels(32);
+        let white = tinted(32, [255, 255, 255]);
+        assert_eq!(teal.len(), white.len());
+        for (a, b) in teal.chunks(4).zip(white.chunks(4)) {
+            assert_eq!(a[3], b[3], "the same pixels are covered");
+            if b[3] > 0 {
+                assert_eq!(&b[..3], &[255, 255, 255]);
+            }
+        }
+        assert!(teal.chunks(4).any(|p| p[3] > 0));
+    }
 }
