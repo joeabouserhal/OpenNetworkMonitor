@@ -61,6 +61,33 @@ fn shade(x: f64, y: f64) -> Option<[f64; 3]> {
 
 /// The full icon: the tile with its bars, smooth at any size.
 pub fn pixels(size: u32) -> Vec<u8> {
+    render(size, shade)
+}
+
+/// The bars alone on a clear background, with `outer` for the two outside bars, for the small
+/// icon in the window's title bar. It is for the bar's own colour, light or dark.
+#[allow(dead_code)]
+pub fn mark(size: u32, outer: [u8; 3]) -> Vec<u8> {
+    let outer = outer.map(|channel| f64::from(channel) / 255.0);
+    render(size, |x, y| {
+        GLYPH
+            .iter()
+            .enumerate()
+            .find_map(|(index, &(x0, y0, x1, y1))| {
+                let bar = distance(
+                    x,
+                    y,
+                    ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+                    ((x1 - x0) / 2.0, (y1 - y0) / 2.0),
+                    2.4,
+                );
+                (bar <= 0.0).then_some(if index == 1 { BLUE } else { outer })
+            })
+    })
+}
+
+/// Anti-aliased RGBA of the 32-unit artwork described by `shade`.
+fn render(size: u32, shade: impl Fn(f64, f64) -> Option<[f64; 3]>) -> Vec<u8> {
     const SAMPLES: u32 = 4;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let unit = 32.0 / f64::from(size);

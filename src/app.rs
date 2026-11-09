@@ -338,6 +338,7 @@ impl MonitorApp {
             ),
         };
         crate::tray::remember_window(cc);
+        crate::tray::set_caption_icon(tokens.is_dark());
         // A newer build asks this copy to exit the same way Tray > Exit does, so data is saved first.
         let exit = tray.as_ref().map_or_else(
             || Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -754,6 +755,7 @@ impl eframe::App for MonitorApp {
         }
         if self.titlebar != Some(tokens) {
             crate::tray_menu::set_palette(crate::tray_menu::Palette::from_tokens(&tokens));
+            crate::tray::set_caption_icon(tokens.is_dark());
             crate::titlebar::apply(&*frame, crate::titlebar::Colors::from_tokens(&tokens));
             self.titlebar = Some(tokens);
         }

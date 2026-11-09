@@ -9,8 +9,12 @@ use std::{
 };
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::{
-    Foundation::HWND,
-    UI::WindowsAndMessaging::{IsWindow, PostMessageW, WM_MOUSEMOVE},
+    Foundation::{HWND, LPARAM, WPARAM},
+    Graphics::Gdi::CreateBitmap,
+    UI::WindowsAndMessaging::{
+        CreateIconIndirect, ICON_SMALL, ICONINFO, IsWindow, PostMessageW, SendMessageW,
+        WM_MOUSEMOVE, WM_SETICON,
+    },
 };
 
 pub struct Tray {
@@ -155,6 +159,59 @@ pub fn taskbar_is_dark() -> bool {
 
 /// The main window, for the wake-ups below. Zero until `remember_window` is called.
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// Gives the window's small icon, the one in its title bar, just the three bars in the colour
+/// that shows on the title bar, while the taskbar keeps the full tile.
+pub fn set_caption_icon(dark_title_bar: bool) {
+    static ICONS: std::sync::Mutex<[isize; 2]> = std::sync::Mutex::new([0; 2]);
+    let hwnd = MAIN_WINDOW.load(Ordering::Acquire);
+    let Ok(mut icons) = ICONS.lock() else {
+        return;
+    };
+    let slot = usize::from(dark_title_bar);
+    if hwnd == 0 {
+        return;
+    }
+    if icons[slot] == 0 {
+        const SIZE: u32 = 32;
+        let outer = if dark_title_bar {
+            [0xfa, 0xfa, 0xfa]
+        } else {
+            [0x18, 0x18, 0x1b]
+        };
+        // Windows wants blue, green, red, alpha, and a mask it ignores for 32-bit icons.
+        let bgra: Vec<u8> = crate::app_icon::mark(SIZE, outer)
+            .chunks(4)
+            .flat_map(|p| [p[2], p[1], p[0], p[3]])
+            .collect();
+        // SAFETY: the bitmaps copy the pixel data, which is SIZE x SIZE x 4 bytes, before the call
+        // returns; the icon owns them afterwards and lives for the rest of the process.
+        let icon = unsafe {
+            let color = CreateBitmap(SIZE as i32, SIZE as i32, 1, 32, bgra.as_ptr().cast());
+            let mask = CreateBitmap(SIZE as i32, SIZE as i32, 1, 1, std::ptr::null());
+            let info = ICONINFO {
+                fIcon: 1,
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: mask,
+                hbmColor: color,
+            };
+            CreateIconIndirect(&info)
+        };
+        icons[slot] = icon as isize;
+    }
+    if icons[slot] != 0 {
+        // SAFETY: the handles are the main window and an icon created above, both still alive.
+        unsafe {
+            SendMessageW(
+                hwnd as HWND,
+                WM_SETICON,
+                ICON_SMALL as WPARAM,
+                icons[slot] as LPARAM,
+            );
+        }
+    }
+}
 
 pub fn remember_window(window: &impl HasWindowHandle) {
     if let Ok(handle) = window.window_handle()
