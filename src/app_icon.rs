@@ -94,6 +94,8 @@ pub fn pixels(size: u32) -> Vec<u8> {
 }
 
 /// Only the three bars, in one colour, for the tray icon's accent and monochrome styles.
+/// The build script needs just `pixels`, hence the allowance.
+#[allow(dead_code)]
 pub fn tinted(size: u32, [red, green, blue]: [u8; 3]) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let scale = f64::from(size) / 32.0;
