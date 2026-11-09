@@ -5,11 +5,11 @@ use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect};
 const PAGES: [&str; 5] = ["overview", "apps", "connections", "adapters", "settings"];
 
 /// Window sizes in physical pixels with the interface size they are used at. Every one is at
-/// least the minimum logical size (1120 x 780 points) once the interface size is applied.
+/// least the minimum logical size (1120 x 748 points) once the interface size is applied.
 const SIZES: [(Vec2, f32); 5] = [
-    (Vec2::new(952.0, 663.0), 0.85),
-    (Vec2::new(1120.0, 780.0), 1.0),
-    (Vec2::new(1440.0, 820.0), 0.85),
+    (Vec2::new(952.0, 636.0), 0.85),
+    (Vec2::new(1120.0, 748.0), 1.0),
+    (Vec2::new(1440.0, 788.0), 0.85),
     (Vec2::new(1232.0, 858.0), 1.1),
     (Vec2::new(1920.0, 1080.0), 1.0),
 ];

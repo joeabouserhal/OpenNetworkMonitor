@@ -27,7 +27,9 @@ fn main() {
         tray_menu::open(((width - 60) as f64, (height - 20) as f64), false);
         let started = std::time::Instant::now();
         let mut message: MSG = std::mem::zeroed();
-        while started.elapsed().as_secs() < 8 && GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+        while started.elapsed().as_secs() < 8
+            && GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0
+        {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }

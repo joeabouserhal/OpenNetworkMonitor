@@ -9,7 +9,7 @@ use crate::ui::{
 use eframe::egui::{Color32, CornerRadius, PopupCloseBehavior};
 use std::collections::HashMap;
 
-const STAT_HEIGHT: f32 = 124.0;
+const STAT_HEIGHT: f32 = 92.0;
 /// Height of the row holding top apps and destinations. The speed chart takes whatever
 /// the window leaves above it.
 /// A row of the app list: path, name, text for the right edge and, for the top list, the
@@ -544,11 +544,11 @@ struct Stat {
 }
 
 fn stat_card(ui: &mut egui::Ui, t: &Tokens, stat: &Stat) {
-    card(ui, 16, |ui| {
-        ui.set_min_height(STAT_HEIGHT - 34.0);
-        ui.spacing_mut().item_spacing.y = 4.0;
+    card(ui, 12, |ui| {
+        ui.set_min_height(STAT_HEIGHT - 26.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
         let (head, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Label,
@@ -574,8 +574,8 @@ fn stat_card(ui: &mut egui::Ui, t: &Tokens, stat: &Stat) {
         let galley = text::number_with_unit(
             ui.painter(),
             &stat.value,
-            text::semibold(28.0),
-            text::regular(14.0),
+            text::semibold(24.0),
+            text::regular(13.0),
             t.foreground,
             t.muted_foreground,
         );
@@ -585,7 +585,7 @@ fn stat_card(ui: &mut egui::Ui, t: &Tokens, stat: &Stat) {
         );
         ui.painter().galley(rect.min, galley, t.foreground);
         let (note, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 14.0), Sense::hover());
         text::paint(
             ui.painter(),
             note,

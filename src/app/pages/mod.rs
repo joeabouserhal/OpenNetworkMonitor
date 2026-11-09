@@ -18,12 +18,12 @@ mod settings;
 mod toolbar;
 
 pub const NAV_WIDTH: f32 = 232.0;
-pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1440.0, 820.0];
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1440.0, 788.0];
 /// The smallest window, in physical pixels at the default interface size. Pages are laid out
 /// for a fixed logical size and up, so nothing is hidden or rearranged in a small window.
-pub const MIN_WINDOW_SIZE: [f32; 2] = [952.0, 663.0];
+pub const MIN_WINDOW_SIZE: [f32; 2] = [952.0, 636.0];
 /// The smallest logical size every page is built for, in points at any interface size.
-pub const MIN_LOGICAL_SIZE: [f32; 2] = [1120.0, 780.0];
+pub const MIN_LOGICAL_SIZE: [f32; 2] = [1120.0, 748.0];
 /// Page content is centred and no wider than this.
 const CONTENT_MAX_WIDTH: f32 = 1240.0;
 const PAGE_PADDING: f32 = 24.0;
