@@ -1,22 +1,22 @@
 /// Shared artwork for the window, tray, and executable resource. This file is also compiled by
 /// build.rs, so it depends on nothing but the standard library.
 ///
-/// The icon is the sidebar's mark: a zinc tile with a hairline border and three rounded bars,
-/// the middle one in the download blue.
+/// The icon is the sidebar's mark: a zinc tile that fills the whole icon, with a faint border and
+/// three rounded bars, the middle one in the download blue.
 const BARS: [(f64, f64, f64, f64); 3] = [
-    (6.5, 17.0, 11.5, 25.0),
-    (13.5, 7.0, 18.5, 25.0),
-    (20.5, 12.0, 25.5, 25.0),
+    (5.1, 17.1, 10.8, 26.3),
+    (13.1, 5.6, 18.9, 26.3),
+    (21.2, 11.3, 26.9, 26.3),
 ];
 const BACKGROUND: [f64; 3] = [
-    0x18 as f64 / 255.0,
-    0x18 as f64 / 255.0,
-    0x1b as f64 / 255.0,
+    0x1c as f64 / 255.0,
+    0x1c as f64 / 255.0,
+    0x20 as f64 / 255.0,
 ];
 const BORDER: [f64; 3] = [
-    0x3f as f64 / 255.0,
-    0x3f as f64 / 255.0,
-    0x46 as f64 / 255.0,
+    0x2e as f64 / 255.0,
+    0x2e as f64 / 255.0,
+    0x34 as f64 / 255.0,
 ];
 const WHITE: [f64; 3] = [
     0xfa as f64 / 255.0,
@@ -38,7 +38,7 @@ fn distance(x: f64, y: f64, centre: (f64, f64), half: (f64, f64), radius: f64) -
 
 /// The colour at a point of the 32-unit artwork, or `None` outside the tile.
 fn shade(x: f64, y: f64) -> Option<[f64; 3]> {
-    let tile = distance(x, y, (16.0, 16.0), (15.25, 15.25), 7.0);
+    let tile = distance(x, y, (16.0, 16.0), (16.0, 16.0), 7.5);
     if tile > 0.0 {
         return None;
     }
@@ -54,7 +54,7 @@ fn shade(x: f64, y: f64) -> Option<[f64; 3]> {
             return Some(if index == 1 { BLUE } else { WHITE });
         }
     }
-    Some(if tile > -0.9 { BORDER } else { BACKGROUND })
+    Some(if tile > -0.8 { BORDER } else { BACKGROUND })
 }
 
 /// The full icon: the tile with its bars, smooth at any size.

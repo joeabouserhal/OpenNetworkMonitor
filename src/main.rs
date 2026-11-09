@@ -60,9 +60,9 @@ fn run() -> Result<()> {
     window_state::repair_file(&data_dir.join("preferences.ron"));
     let store = open_store(&data_dir.join("usage.db"))?;
     let icon = eframe::egui::IconData {
-        rgba: tray::icon_pixels(),
-        width: 32,
-        height: 32,
+        rgba: tray::icon_pixels_at(256),
+        width: 256,
+        height: 256,
     };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

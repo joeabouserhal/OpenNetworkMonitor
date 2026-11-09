@@ -27,6 +27,10 @@ pub struct Tray {
 pub fn icon_pixels() -> Vec<u8> {
     crate::app_icon::pixels(32)
 }
+/// The app icon at another size, for the window, which Windows scales to the taskbar.
+pub fn icon_pixels_at(size: u32) -> Vec<u8> {
+    crate::app_icon::pixels(size)
+}
 
 impl Tray {
     pub fn new(ctx: egui::Context) -> anyhow::Result<Self> {
