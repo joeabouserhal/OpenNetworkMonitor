@@ -414,6 +414,7 @@ mod render_tests {
                 [1200.0, 1900.0],
                 vec![],
                 |app| {
+                    app.settings.storage_open = true;
                     app.settings.cap_enabled = true;
                     app.settings.alert_new_apps = true;
                     app.data.cap = Some(crate::worker::CapStatus {

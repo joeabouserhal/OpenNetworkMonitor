@@ -26,6 +26,72 @@ fn section(ui: &mut egui::Ui, title: &str, description: &str, rows: impl FnOnce(
     });
 }
 
+/// A titled card that opens and closes when its header is clicked, with the chevron at the right.
+/// The description stays in view either way, so it can carry a summary.
+fn collapsible_section(
+    ui: &mut egui::Ui,
+    id: &str,
+    title: &str,
+    description: &str,
+    open: &mut bool,
+    rows: impl FnOnce(&mut egui::Ui),
+) {
+    let t = tk(ui.ctx());
+    card(ui, 0, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let expanded = *open;
+        let header = egui::Frame::new()
+            .inner_margin(Margin {
+                left: 20,
+                right: 20,
+                top: 18,
+                bottom: 14,
+            })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                layout::card_header(ui, title, description, |ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                    icon::paint(
+                        ui.painter(),
+                        if expanded {
+                            Icon::ChevronUp
+                        } else {
+                            Icon::ChevronDown
+                        },
+                        rect.center(),
+                        16.0,
+                        t.muted_foreground,
+                    );
+                });
+            });
+        // The whole header is the button, so there is a big place to click.
+        let response = ui.interact(
+            header.response.rect,
+            ui.make_persistent_id(id),
+            Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!(
+                    "{title}, {}",
+                    if expanded { "expanded" } else { "collapsed" }
+                ),
+            )
+        });
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *open = !*open;
+        }
+        if expanded {
+            rows(ui);
+        }
+    });
+}
+
 /// One row: title and description on the left, `control` on the right, with a border above.
 fn row(
     ui: &mut egui::Ui,
@@ -681,10 +747,21 @@ impl MonitorApp {
         let usage = self.storage_usage();
         let data_dir = self.data_dir.clone();
         let program = std::env::current_exe().ok();
-        section(
+        let mut open = self.settings.storage_open;
+        let summary = if open {
+            format!(
+                "{} used \u{b7} where the app keeps its files",
+                format_bytes(usage.total() as f64)
+            )
+        } else {
+            format!("{} used", format_bytes(usage.total() as f64))
+        };
+        collapsible_section(
             ui,
+            "storage-section",
             "Storage",
-            "Where the app keeps its files and how much space they take.",
+            &summary,
+            &mut open,
             |ui| {
                 let breakdown = format!(
                     "History {} \u{b7} Settings {}{}",
@@ -795,7 +872,10 @@ impl MonitorApp {
                 row(
                     ui,
                     "App data folder",
-                    &data_dir.display().to_string(),
+                    &format!(
+                        "{}\nHolds the history, your settings and the log file (onm.log), which records what the app did and the details of any crash.",
+                        data_dir.display()
+                    ),
                     120.0,
                     |ui| {
                         if Button::new("Open folder")
@@ -810,28 +890,6 @@ impl MonitorApp {
                         }
                     },
                 );
-                if let Some(log) = crate::diagnostics::log_path() {
-                    row(
-                        ui,
-                        "Log file",
-                        &format!(
-                            "{}\nWhat the app did at start and exit, and the details of any crash. It never holds traffic data.",
-                            log.display()
-                        ),
-                        130.0,
-                        |ui| {
-                            if Button::new("Show in folder")
-                                .icon(Icon::External)
-                                .variant(Variant::Outline)
-                                .size(Size::Sm)
-                                .show(ui)
-                                .clicked()
-                            {
-                                connection_tools::reveal_in_explorer(&log.display().to_string());
-                            }
-                        },
-                    );
-                }
                 if let Some(program) = program {
                     row(
                         ui,
@@ -855,6 +913,7 @@ impl MonitorApp {
                 }
             },
         );
+        self.settings.storage_open = open;
     }
 
     fn history_section(&mut self, ui: &mut egui::Ui) {

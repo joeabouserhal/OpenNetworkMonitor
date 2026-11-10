@@ -716,3 +716,43 @@ fn month_and_day_starts_are_stable_and_never_after_the_time_they_start() {
         assert!(next > at && next - month <= 32 * 86_400 && next - month >= 27 * 86_400);
     }
 }
+
+#[test]
+fn the_storage_card_opens_and_closes_and_says_how_much_it_uses_either_way() {
+    let size = Vec2::new(1440.0, 1400.0);
+    let ctx = egui::Context::default();
+    let mut app = MonitorApp::preview(&ctx, "settings", false);
+    assert!(!app.settings.storage_open, "closed to start with");
+    let closed = texts(&settle(&mut app, &ctx, size));
+    assert!(closed.iter().any(|(t, _)| t == "Storage"));
+    assert!(
+        closed.iter().any(|(t, _)| t.ends_with(" used")),
+        "the usage is shown while it is closed"
+    );
+    assert!(
+        !closed.iter().any(|(t, _)| t == "App data folder"),
+        "its rows are hidden"
+    );
+    // One click on its header opens it.
+    click(&mut app, &ctx, size, "Storage");
+    assert!(app.settings.storage_open);
+    let open = texts(&settle(&mut app, &ctx, size));
+    assert!(open.iter().any(|(t, _)| t == "App data folder"));
+    assert!(
+        open.iter()
+            .any(|(t, _)| t.contains("used \u{b7} where the app keeps"))
+    );
+    // The folder holds the history, settings and log, and there is only one button for it.
+    assert!(
+        open.iter()
+            .any(|(t, _)| t.contains("the log file (onm.log)")),
+        "the row says the log is in this folder too"
+    );
+    assert!(
+        !open.iter().any(|(t, _)| t == "Log file"),
+        "no second row for the same folder"
+    );
+    assert_eq!(open.iter().filter(|(t, _)| t == "Open folder").count(), 1);
+    click(&mut app, &ctx, size, "Storage");
+    assert!(!app.settings.storage_open);
+}

@@ -78,6 +78,8 @@ struct Settings {
     /// non-administrators can change.
     accept_startup_risk: bool,
     tray_icon: TrayIconStyle,
+    /// Whether the Storage card in Settings is open.
+    storage_open: bool,
     /// After this many days minute-by-minute history is merged into hourly totals; 0 keeps
     /// every minute for ever.
     detail_days: u32,
@@ -172,6 +174,7 @@ impl Default for Settings {
             close_to_tray: true,
             accept_startup_risk: false,
             tray_icon: TrayIconStyle::Default,
+            storage_open: false,
             detail_days: 30,
             daily_days: 0,
             geo: None,

@@ -89,7 +89,7 @@ Minute-by-minute history with every remote address is large: busy peer-to-peer a
 
 ## Logging and crashes
 
-- **Log.** `onm.log` in the data folder records what the app does at start and exit, the history database opening (and any upgrade), capture starting or failing, history merging and any save that fails. Settings → Storage shows where it is and can open its folder. It is capped at 1 MB with one older copy.
+- **Log.** `onm.log` in the data folder records what the app does at start and exit, the history database opening (and any upgrade), capture starting or failing, history merging and any save that fails. Settings → Storage has an App data folder button that opens the folder holding it, together with the history and your settings. It is capped at 1 MB with one older copy.
 - **Crash details.** A panic, or a Windows exception such as an access violation, is written to the log with where it happened, the thread, a backtrace and the lines just before it.
 - **Saving on a crash.** The crash handler saves the traffic that was still waiting in memory to the history, using its own database connection. It waits no more than a couple of seconds, so a crash is never made to hang. It is best effort: a crash can leave the process in a state where nothing works, and a force close, a power cut or a hard hang gives it no chance to run.
 - **Detecting a crash.** While the app runs, `session.txt` marks it as running, and a normal exit, or Windows shutting down, removes it. If the marker is still there at the next start and that process is gone, the app logs it and shows a notice: "The last session ended unexpectedly", with the crash note if there was one.
