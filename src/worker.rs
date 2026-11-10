@@ -29,9 +29,8 @@ pub struct Shared {
     pub app_series: Option<Arc<AppSeries>>,
     /// Use of the monthly data cap so far, when a cap is on.
     pub cap: Option<CapStatus>,
-    /// The apps that most recently used the network, refreshed every few seconds.
+    /// The apps that most recently used the network, kept up to date as traffic is saved.
     pub recent_apps: Vec<RecentApp>,
-    pub recent_read_at: i64,
     pub series_generation: u64,
     pub notice: String,
     pub revision: u64,
@@ -214,8 +213,29 @@ struct HistoryRequest {
     revision: u64,
     focus: Option<(String, SeriesView)>,
 }
-/// How often the list of recently used apps is read again.
-const RECENT_REFRESH_SECONDS: i64 = 10;
+/// How many apps' last use is remembered, far more than the Overview lists.
+const RECENT_APPS_KEPT: usize = 500;
+/// The most recently used apps the Overview lists.
+const RECENT_APPS_SHOWN: usize = 30;
+/// Publishes the newest of `last_used` for the Overview's Recently used list.
+fn publish_recent(shared: &Mutex<Shared>, last_used: &HashMap<String, i64>) {
+    let mut apps: Vec<RecentApp> = last_used
+        .iter()
+        .map(|(app, last_seen)| RecentApp {
+            app: app.clone(),
+            last_seen: *last_seen,
+        })
+        .collect();
+    apps.sort_by(|a, b| {
+        b.last_seen
+            .cmp(&a.last_seen)
+            .then_with(|| a.app.cmp(&b.app))
+    });
+    apps.truncate(RECENT_APPS_SHOWN);
+    if let Ok(mut state) = shared.lock() {
+        state.recent_apps = apps;
+    }
+}
 /// How long a daily or monthly timeline is reused before it is read again.
 const SERIES_REUSE_SECONDS: i64 = 30;
 /// Reads history, works out app labels and publishes both. Slow for long periods,
@@ -277,18 +297,7 @@ fn load_history(
         }
         None => None,
     };
-    // The recent list scans every app's last minute, so it is refreshed far less often than
-    // the history itself.
-    let recent = shared
-        .lock()
-        .ok()
-        .is_none_or(|state| now - state.recent_read_at >= RECENT_REFRESH_SECONDS)
-        .then(|| store.recent_apps(30).unwrap_or_default());
     if let Ok(mut s) = shared.lock() {
-        if let Some(recent) = recent {
-            s.recent_apps = recent;
-            s.recent_read_at = now;
-        }
         if s.app_series.as_deref() != series.as_deref() {
             s.app_series = series;
             s.series_generation += 1;
@@ -601,6 +610,15 @@ fn run(
     let mut connections = Vec::new();
     let mut visible = HashSet::new();
     let mut visibility_error = None;
+    // When each app last used the network. Read from the history once, then kept up to date from
+    // what is saved, so the Overview never has to scan the whole history for it.
+    let mut last_used: HashMap<String, i64> = store
+        .recent_apps(RECENT_APPS_KEPT)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|recent| (recent.app, recent.last_seen))
+        .collect();
+    publish_recent(&shared, &last_used);
     let mut known = store.known_adapter_ids().unwrap_or_default();
     if let Ok(ids) = capture::visible_adapter_ids() {
         visible = ids;
@@ -1032,6 +1050,20 @@ fn run(
                 }
                 match store.write_capture(&pending, &pending_samples) {
                     Ok(()) => {
+                        let mut used = false;
+                        for (minute, batch) in &pending {
+                            for row in batch
+                                .iter()
+                                .filter(|row| row.source == "transport" && !row.app.is_empty())
+                            {
+                                let last = last_used.entry(row.app.clone()).or_insert(*minute);
+                                *last = (*last).max(*minute);
+                                used = true;
+                            }
+                        }
+                        if used {
+                            publish_recent(&shared, &last_used);
+                        }
                         pending.clear();
                         pending_samples.clear();
                     }
@@ -1078,10 +1110,13 @@ fn run(
             }
         }
         let (start, end) = filter.time_bounds(chrono::Utc::now().timestamp());
-        let refresh_interval = if !filter.all_time() && end.saturating_sub(start) <= 86400 {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_secs(5)
+        // Each refresh reads and sums the whole period, so a longer period is read less often.
+        // Its chart has a point per minute or less, so a few seconds' delay is not visible.
+        let refresh_interval = match (filter.all_time(), end.saturating_sub(start)) {
+            (false, 0..=3600) => Duration::from_secs(1),
+            (false, 3601..=21_600) => Duration::from_secs(2),
+            (false, 21_601..=86_400) => Duration::from_secs(4),
+            _ => Duration::from_secs(5),
         };
         if (refresh && !visible.is_empty())
             || (sample && last_refresh.elapsed() >= refresh_interval)
@@ -1110,6 +1145,26 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recent_list_is_newest_first_and_capped() {
+        let shared = Mutex::new(Shared::default());
+        let mut last_used: HashMap<String, i64> = (0..40)
+            .map(|i| (format!("app{i:02}.exe"), 1_000 + i))
+            .collect();
+        last_used.insert("tie.exe".into(), 1_039);
+        publish_recent(&shared, &last_used);
+        let state = shared.lock().unwrap();
+        assert_eq!(state.recent_apps.len(), RECENT_APPS_SHOWN);
+        assert_eq!(state.recent_apps[0].app, "app39.exe", "ties go by name");
+        assert_eq!(state.recent_apps[1].app, "tie.exe");
+        assert!(
+            state
+                .recent_apps
+                .windows(2)
+                .all(|w| w[0].last_seen >= w[1].last_seen)
+        );
+    }
     #[test]
     fn history_loads_on_its_own_thread_and_exit_does_not_wait_for_it() -> Result<()> {
         let dir = tempfile::tempdir()?;
