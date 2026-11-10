@@ -359,19 +359,28 @@ impl MonitorApp {
         // worker to save what is waiting as soon as the notice arrives, and wait briefly for it.
         crate::tray::on_session_end({
             let commands = worker.tx.clone();
-            move || {
+            move |ending| {
                 let (done, saved) = std::sync::mpsc::channel();
                 if commands.send(Command::SaveNow(done)).is_ok() {
                     let _ = saved.recv_timeout(std::time::Duration::from_secs(3));
+                }
+                if ending {
+                    crate::log_info!("Windows is ending the session; the history was saved");
+                    // Windows terminates the app next, so this is the only chance to say it closed
+                    // on purpose.
+                    crate::diagnostics::end_session();
                 }
             }
         });
         let (tray, view_warning) = match Tray::new(cc.egui_ctx.clone()) {
             Ok(t) => (Some(t), String::new()),
-            Err(e) => (
-                None,
-                format!("Tray unavailable: {e}. Closing the window will exit."),
-            ),
+            Err(e) => {
+                crate::log_warn!("The tray icon could not be created: {e}");
+                (
+                    None,
+                    format!("Tray unavailable: {e}. Closing the window will exit."),
+                )
+            }
         };
         crate::tray::remember_window(cc);
         crate::tray::set_caption_icon(tokens.is_dark());
@@ -388,6 +397,18 @@ impl MonitorApp {
         if std::env::args().any(|arg| arg == "--startup") {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Visible(tray.is_none()));
+        }
+        // If the last run ended in a crash, a notice says so and where the details are.
+        if let crate::diagnostics::PreviousSession::Unclean { started, crash, .. } =
+            crate::diagnostics::previous_session()
+        {
+            let why = crash.map_or_else(String::new, |crash| format!(" ({crash})"));
+            let text = format!(
+                "The last session, started {started}, ended unexpectedly{why}. Anything it had saved is intact. The details are in the log file."
+            );
+            if let Ok(mut state) = worker.shared.lock() {
+                state.notice = text;
+            }
         }
         Ok(Self {
             worker,
@@ -826,9 +847,12 @@ impl eframe::App for MonitorApp {
         self.draw(root);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::log_info!("Closing: saving the history");
         // Remove the tray icon promptly while the worker saves its final data.
         drop(self.tray.take());
         self.worker.shutdown();
+        crate::log_info!("Closed normally");
+        crate::diagnostics::end_session();
     }
     /// The saved file holds the settings and the window's place, not egui's own memory: that was
     /// 65 KB of scroll positions and open areas, rewritten every 30 seconds for nothing.

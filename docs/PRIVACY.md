@@ -12,6 +12,8 @@ All files are in `%LOCALAPPDATA%\OpenNetworkMonitor` for the Windows user who ru
 | `preferences.ron` | Your settings: theme, filters, units, interface size, alert choices, the country-database path, window position and whether the welcome card was dismissed. |
 | `alerts.json` | The last data-cap warning you were given this month, so a restart does not repeat it. |
 | `running-build.txt` | A number that lets a newer build replace a running older one. |
+| `onm.log` (and `onm.log.1`, the previous one) | A short log of what the app did: starting and closing, opening the history, starting capture, merging old history, and anything that failed. After a crash it holds the details of the crash. It is capped at 1 MB, and it never holds traffic data, host names or addresses. |
+| `session.txt` | Present while the app runs and removed when it closes normally. If it is still there at the next start, the last run ended unexpectedly, and the app says so. It holds the process number, start time and version, and a one-line note about the crash if there was one. |
 
 The usage history keeps, for every minute: the network adapter, the application's executable path, its process ID, the remote IP address, the protocol and port-based traffic type (for example HTTPS or DNS), whether the destination is local (LAN) or public (WAN), the country if you supplied a country database, the name of the Wi-Fi network (SSID) when one was connected, and the number of bytes sent and received. It also keeps a list of the adapters and Wi-Fi network names it has seen, and per-second adapter counters for the last 24 hours.
 

@@ -153,6 +153,84 @@ const TIERS_SQL: &str = "
         UNION ALL SELECT bucket,source,adapter_id,adapter,app,0,'','',protocol,scope,down,up,traffic_type,wifi_network,3600 FROM traffic_hourly
         UNION ALL SELECT bucket,source,adapter_id,adapter,app,0,'','',protocol,scope,down,up,traffic_type,wifi_network,86400 FROM traffic_daily;";
 
+/// Writes everything in the buffer inside `tx`: the usage rows, the per-second samples and the
+/// hosts' running totals.
+fn write_buffer(tx: &rusqlite::Transaction<'_>, live: &LiveBuffer) -> Result<()> {
+    for (minute, rows) in &live.rows {
+        let rows: Vec<UsageRow> = rows.values().cloned().collect();
+        write_rows(tx, *minute, &rows)?;
+    }
+    {
+        let mut stmt=tx.prepare_cached("INSERT INTO adapter_samples(timestamp,adapter_id,down,up,elapsed,wifi_network) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(timestamp,adapter_id,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,elapsed=elapsed+excluded.elapsed")?;
+        for sample in &live.samples {
+            for (id, (down, up)) in &sample.adapters {
+                stmt.execute(params![
+                    sample.timestamp,
+                    id,
+                    *down,
+                    *up,
+                    sample.interval.max(0.001),
+                    sample
+                        .wifi_networks
+                        .get(id)
+                        .map(String::as_str)
+                        .unwrap_or("")
+                ])?;
+            }
+        }
+    }
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO host_totals(remote,country,down,up,first_seen,last_seen) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(remote) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=CASE WHEN excluded.country='' THEN country ELSE excluded.country END,first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)")?;
+        for host in live.hosts.values() {
+            stmt.execute(params![
+                host.remote,
+                host.country,
+                host.down,
+                host.up,
+                host.first_seen,
+                host.last_seen
+            ])?;
+        }
+    }
+    Ok(())
+}
+/// What a crash handler needs to save the traffic still waiting in memory: where the history is,
+/// and the buffer. It opens its own connection, so it works even if the collector's is stuck.
+pub struct CrashHandle {
+    path: std::path::PathBuf,
+    live: std::sync::Arc<std::sync::Mutex<LiveBuffer>>,
+}
+impl CrashHandle {
+    /// Saves what is waiting and returns how many rows that was. It gives up after a couple of
+    /// seconds rather than hang a crash: the buffer may be held by the thread that crashed.
+    pub fn save(&self) -> Result<usize> {
+        let started = std::time::Instant::now();
+        let mut live = loop {
+            match self.live.try_lock() {
+                Ok(live) => break live,
+                Err(std::sync::TryLockError::Poisoned(held)) => break held.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    anyhow::ensure!(
+                        started.elapsed() < std::time::Duration::from_millis(1500),
+                        "the unsaved history was in use"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
+        if live.is_empty() {
+            return Ok(0);
+        }
+        let rows = live.rows.values().map(|rows| rows.len()).sum();
+        let mut db = Connection::open(&self.path).context("Open the history to save into it")?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        let tx = db.transaction()?;
+        write_buffer(&tx, &live)?;
+        tx.commit()?;
+        *live = LiveBuffer::default();
+        Ok(rows)
+    }
+}
 /// The rows of a period, as stored. Every saved row is already unique, and the sums and order are
 /// worked out as they are read, so SQLite has nothing to sort and uses no scratch space.
 fn history_sql(table: &str, span: &str) -> String {
@@ -290,6 +368,9 @@ impl Store {
                 PRAGMA user_version=7;",
             )?;
             tx.commit()?;
+        }
+        if version < SCHEMA_VERSION {
+            crate::log_info!("History upgraded from layout {version} to {SCHEMA_VERSION}");
         }
         Ok(Self::with(db))
     }
@@ -690,6 +771,14 @@ impl Store {
     pub fn discard_staged(&mut self) {
         *self.lock_live() = LiveBuffer::default();
     }
+    /// A handle for saving the staged traffic in an emergency, if the history is a file.
+    pub fn crash_handle(&self) -> Option<CrashHandle> {
+        let path = self.db.path().filter(|path| !path.is_empty())?;
+        Some(CrashHandle {
+            path: std::path::PathBuf::from(path),
+            live: self.live.clone(),
+        })
+    }
     /// Writes everything staged in one transaction. Reads wait for the commit, so none sees the
     /// rows twice or not at all. If the write fails nothing is lost: the rows stay staged.
     pub fn save(&mut self) -> Result<()> {
@@ -701,42 +790,7 @@ impl Store {
             return Ok(());
         }
         let tx = self.db.transaction()?;
-        for (minute, rows) in &live.rows {
-            let rows: Vec<UsageRow> = rows.values().cloned().collect();
-            write_rows(&tx, *minute, &rows)?;
-        }
-        {
-            let mut stmt=tx.prepare_cached("INSERT INTO adapter_samples(timestamp,adapter_id,down,up,elapsed,wifi_network) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(timestamp,adapter_id,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,elapsed=elapsed+excluded.elapsed")?;
-            for sample in &live.samples {
-                for (id, (down, up)) in &sample.adapters {
-                    stmt.execute(params![
-                        sample.timestamp,
-                        id,
-                        *down,
-                        *up,
-                        sample.interval.max(0.001),
-                        sample
-                            .wifi_networks
-                            .get(id)
-                            .map(String::as_str)
-                            .unwrap_or("")
-                    ])?;
-                }
-            }
-        }
-        {
-            let mut stmt = tx.prepare_cached("INSERT INTO host_totals(remote,country,down,up,first_seen,last_seen) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(remote) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=CASE WHEN excluded.country='' THEN country ELSE excluded.country END,first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)")?;
-            for host in live.hosts.values() {
-                stmt.execute(params![
-                    host.remote,
-                    host.country,
-                    host.down,
-                    host.up,
-                    host.first_seen,
-                    host.last_seen
-                ])?;
-            }
-        }
+        write_buffer(&tx, &live)?;
         tx.commit()?;
         *live = LiveBuffer::default();
         Ok(())
@@ -1795,6 +1849,49 @@ mod tests {
             900,
             "all of it, once"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_crash_handle_saves_the_waiting_traffic_without_the_stores_help() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        let mut store = Store::open(&path)?;
+        let handle = store.crash_handle().expect("a file database has a path");
+        assert_eq!(handle.save()?, 0, "nothing waiting, nothing written");
+        let first = stage_three_minutes(&mut store);
+        // The store's own connection is left alone, as if its thread had crashed.
+        assert_eq!(handle.save()?, 9);
+        assert_eq!(
+            store.staged_rows(),
+            0,
+            "the buffer is emptied once it is on the disk"
+        );
+        let reopened = Store::open(&dir.path().join("usage.db"))?;
+        assert_eq!(
+            reopened
+                .history(&window(first, Source::Transport), first + 600)?
+                .down,
+            450
+        );
+        assert_eq!(reopened.host_totals(10)?[0].down, 300);
+        // A buffer held by a thread that never lets go does not hang the crash report.
+        stage_three_minutes(&mut store);
+        let live = store.live.clone();
+        let held = live.lock().unwrap();
+        let started = std::time::Instant::now();
+        assert!(handle.save().is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(held);
+        // A thread that died holding it leaves the data usable.
+        let poisoned = store.live.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = poisoned.lock().unwrap();
+            panic!("died holding the lock");
+        })
+        .join();
+        assert_eq!(handle.save()?, 9, "saved even though the lock was poisoned");
+        assert!(Store::open(Path::new(":memory:"))?.crash_handle().is_none());
         Ok(())
     }
 

@@ -96,11 +96,33 @@ impl Worker {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let (tx, rx) = mpsc::channel();
         let state = shared.clone();
+        // If the app crashes, this saves what is still waiting in memory.
+        if let Some(handle) = store.crash_handle() {
+            crate::diagnostics::set_emergency_save(move || match handle.save() {
+                Ok(0) => "nothing was waiting to be saved".to_owned(),
+                Ok(rows) => format!("saved {rows} waiting rows"),
+                Err(e) => format!("could not save: {e:#}"),
+            });
+        }
         let reader = HistoryReader::start(&store, &shared, &tx, &repaint)?;
         spawn_integrity_check(&store, &shared, &repaint);
         let join = thread::Builder::new()
             .name("network-collector".into())
-            .spawn(move || run(store, filter, geo, state, rx, repaint, reader))?;
+            .spawn(move || {
+                let (notice_to, wake) = (state.clone(), repaint.clone());
+                // A panic here would otherwise end the capture without a word.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    run(store, filter, geo, state, rx, repaint, reader)
+                }));
+                if outcome.is_err() {
+                    crate::log_error!("The monitoring thread stopped after a crash");
+                    notice(
+                        &notice_to,
+                        "Monitoring stopped unexpectedly. Restart the app. The details are in the log file.".into(),
+                    );
+                    wake.request_repaint();
+                }
+            })?;
         Ok(Self {
             shared,
             tx,
@@ -666,6 +688,10 @@ fn run(
         notice(&shared, format!("Country database: {e}"));
     }
     let mut etw = capture::EtwCapture::start();
+    match &etw {
+        Ok(_) => crate::log_info!("Monitoring started: per-app capture is active"),
+        Err(e) => crate::log_warn!("Monitoring started without per-app capture: {e}"),
+    }
     let mut wifi_monitor = capture::wifi::WifiMonitor::new();
     let mut wifi_tracker = WifiTracker::default();
     let mut wifi_catalog: HashMap<String, WifiNetwork> = store
@@ -698,6 +724,7 @@ fn run(
     let mut compaction_busy = true;
     // A Compact now in progress: the file's size before it, and the rows merged so far.
     let mut compact_job: Option<(u64, usize)> = None;
+    let mut merged_this_run = 0usize;
     let mut lifetime = false;
     let mut window_shown = true;
     // Set when something asks for the staged traffic to be written at the next tick.
@@ -778,6 +805,7 @@ fn run(
         for cmd in first.into_iter().chain(rx.try_iter()) {
             match cmd {
                 Command::Stop => {
+                    crate::log_info!("Stopping monitoring and saving the history");
                     stop = true;
                     break;
                 }
@@ -821,8 +849,9 @@ fn run(
                 Command::Labels(found) => labels.extend(found),
                 Command::Pause(paused) => recording_paused = paused,
                 Command::SaveNow(done) => {
-                    if store.save().is_ok() {
-                        last_save = Instant::now();
+                    match store.save() {
+                        Ok(()) => last_save = Instant::now(),
+                        Err(e) => crate::log_warn!("Saving for the session end failed: {e:#}"),
                     }
                     let _ = store.checkpoint();
                     let _ = done.send(());
@@ -877,6 +906,10 @@ fn run(
                 Command::RetryCapture => {
                     drop(etw);
                     etw = capture::EtwCapture::start();
+                    match &etw {
+                        Ok(_) => crate::log_info!("Per-app capture restarted"),
+                        Err(e) => crate::log_warn!("Per-app capture could not restart: {e}"),
+                    }
                 }
             }
         }
@@ -1218,6 +1251,7 @@ fn run(
                             save_requested = false;
                         }
                         Err(e) => {
+                            crate::log_warn!("Saving the history failed, will retry: {e:#}");
                             // Keep what is staged and try again soon, not on every tick.
                             last_save = Instant::now()
                                 .checked_sub(SAVE_EVERY - SAVE_RETRY)
@@ -1230,6 +1264,7 @@ fn run(
                     }
                 }
                 if store.staged_rows() > 100_000 {
+                    crate::log_error!("Too much unsaved traffic; recording stopped");
                     storage_failed = true;
                     store.discard_staged();
                 }
@@ -1255,12 +1290,19 @@ fn run(
                 match step {
                     Ok(0) => {
                         compaction_busy = false;
+                        if merged_this_run > 0 {
+                            crate::log_info!("History merged: {merged_this_run} rows");
+                            merged_this_run = 0;
+                        }
                         if let Some((before, merged)) = compact_job.take() {
-                            notice(&shared, finish_compaction(&mut store, before, merged));
+                            let result = finish_compaction(&mut store, before, merged);
+                            crate::log_info!("Compact now finished: {result}");
+                            notice(&shared, result);
                         }
                         refresh = true;
                     }
                     Ok(rows) => {
+                        merged_this_run += rows;
                         compaction_busy = true;
                         if let Some((_, merged)) = &mut compact_job {
                             *merged += rows;
@@ -1268,6 +1310,7 @@ fn run(
                         refresh = true;
                     }
                     Err(e) => {
+                        crate::log_error!("Merging history failed: {e:#}");
                         compaction_busy = false;
                         compact_job = None;
                         notice(&shared, format!("History could not be compacted: {e}"));

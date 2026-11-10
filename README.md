@@ -30,6 +30,7 @@
 - **Alerts.** A notification when a new app uses the network, and a monthly data cap with warnings.
 - **Runs in the tray.** Pause recording, launch at sign-in, and pick the tray icon colour.
 - **Compact history.** Old minute-by-minute history is merged a calendar month at a time into hourly and, optionally, daily totals, with lifetime totals kept for every host, so the database stays small.
+- **Safe to crash.** A small log and a crash handler record what went wrong and save the traffic still in memory.
 - **Light, dark and accent colours.** CSV export, and a local SQLite history you own.
 
 ## Get started

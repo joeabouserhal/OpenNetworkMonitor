@@ -234,9 +234,11 @@ pub fn remember_window(window: &impl HasWindowHandle) {
 }
 
 /// What to do when Windows is shutting down or signing the user out.
-static SESSION_END: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
-/// Sets what runs when the session ends: it must save everything that is waiting, quickly.
-pub fn on_session_end(save: impl Fn() + Send + Sync + 'static) {
+static SESSION_END: std::sync::OnceLock<Box<dyn Fn(bool) + Send + Sync>> =
+    std::sync::OnceLock::new();
+/// Sets what runs when the session ends: it must save everything that is waiting, quickly. The
+/// flag says whether the session really is ending, rather than being asked about.
+pub fn on_session_end(save: impl Fn(bool) + Send + Sync + 'static) {
     let _ = SESSION_END.set(Box::new(save));
 }
 const SESSION_HOOK: usize = 0x4f4e4d;
@@ -264,9 +266,11 @@ unsafe extern "system" fn session_procedure(
     // The query comes first and may be refused by another program; the end notice carries a
     // flag saying whether the session really is ending. Saving on both is harmless, since the
     // second finds little left to save.
-    let ending = message == WM_QUERYENDSESSION || (message == WM_ENDSESSION && wparam != 0);
-    if ending && let Some(save) = SESSION_END.get() {
-        save();
+    let confirmed = message == WM_ENDSESSION && wparam != 0;
+    if (message == WM_QUERYENDSESSION || confirmed)
+        && let Some(save) = SESSION_END.get()
+    {
+        save(confirmed);
     }
     // SAFETY: passes Windows' own arguments to the rest of the chain, which allows the shutdown.
     unsafe { DefSubclassProc(window, message, wparam, lparam) }
@@ -360,8 +364,12 @@ mod tests {
             CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW,
         };
         static SAVES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        on_session_end(|| {
+        static CONFIRMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        on_session_end(|ending| {
             SAVES.fetch_add(1, Ordering::SeqCst);
+            if ending {
+                CONFIRMED.fetch_add(1, Ordering::SeqCst);
+            }
         });
         let class: Vec<u16> = "STATIC".encode_utf16().chain(Some(0)).collect();
         // SAFETY: a built-in window class and null parent/menu/instance create a plain top-level
@@ -390,9 +398,15 @@ mod tests {
             let answer = SendMessageW(hwnd, WM_QUERYENDSESSION, 0, 0);
             assert_eq!(answer, 1, "the shutdown is not held up");
             assert_eq!(SAVES.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                CONFIRMED.load(Ordering::SeqCst),
+                0,
+                "only asked, not ending yet"
+            );
             // Told the session is ending: it saves again.
             SendMessageW(hwnd, WM_ENDSESSION, 1, 0);
             assert_eq!(SAVES.load(Ordering::SeqCst), 2);
+            assert_eq!(CONFIRMED.load(Ordering::SeqCst), 1);
             // Told it was cancelled: nothing to do.
             SendMessageW(hwnd, WM_ENDSESSION, 0, 0);
             assert_eq!(SAVES.load(Ordering::SeqCst), 2);

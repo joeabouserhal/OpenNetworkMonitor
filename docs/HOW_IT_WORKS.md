@@ -87,6 +87,14 @@ Minute-by-minute history with every remote address is large: busy peer-to-peer a
 - **One month at a time.** Nothing is merged day by day. A calendar month is merged, in one pass, once the *whole* month is older than the setting. With 30 days, October is merged on 1 December, November on 31 December, and so on, so detail is kept for at least 30 days and up to a month longer, and between those dates the app does not touch the history. The daily layer works the same way on hourly totals. Settings → Storage shows what is already merged and when the next month goes.
 - **How it runs.** A merge goes through the month a slice at a time (at most a day of minutes per slice, a couple of seconds apart) so capturing is never held up. **Compact now** ignores the month boundaries and merges everything older than the setting right away, then shrinks the file. The file is also shrunk at launch when a third or more of it is unused.
 
+## Logging and crashes
+
+- **Log.** `onm.log` in the data folder records what the app does at start and exit, the history database opening (and any upgrade), capture starting or failing, history merging and any save that fails. Settings → Storage shows where it is and can open its folder. It is capped at 1 MB with one older copy.
+- **Crash details.** A panic, or a Windows exception such as an access violation, is written to the log with where it happened, the thread, a backtrace and the lines just before it.
+- **Saving on a crash.** The crash handler saves the traffic that was still waiting in memory to the history, using its own database connection. It waits no more than a couple of seconds, so a crash is never made to hang. It is best effort: a crash can leave the process in a state where nothing works, and a force close, a power cut or a hard hang gives it no chance to run.
+- **Detecting a crash.** While the app runs, `session.txt` marks it as running, and a normal exit, or Windows shutting down, removes it. If the marker is still there at the next start and that process is gone, the app logs it and shows a notice: "The last session ended unexpectedly", with the crash note if there was one.
+- **A stopped capture is reported.** If the monitoring thread itself panics, the window shows a notice that monitoring stopped, instead of silently recording nothing.
+
 ## Storage reliability
 
 - Captured traffic is **held in memory and saved to the history every 5 minutes** (and whenever the window goes to or comes back from the tray, when you pause, when you export, on exit, and when Windows shuts down or signs you out), not every second. Saving every second rewrote the same database pages over and over, which came to roughly 100 KB a second, around 9 GB a day, of disk writes; saving every 5 minutes is about twenty times less, because each save rewrites the database pages it touches once instead of every second.

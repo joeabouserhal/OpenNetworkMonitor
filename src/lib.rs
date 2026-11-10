@@ -2,6 +2,7 @@ pub mod alerts;
 pub mod app;
 mod app_icon;
 pub mod capture;
+pub mod diagnostics;
 pub mod hosts;
 pub mod icons;
 pub mod model;

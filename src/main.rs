@@ -3,7 +3,9 @@
 compile_error!("OpenNetworkMonitor currently supports Windows only.");
 
 use anyhow::{Context, Result};
-use open_network_monitor::{app, capture, model, store, tray, window_state};
+use open_network_monitor::{
+    app, capture, diagnostics, log_error, log_info, log_warn, model, store, tray, window_state,
+};
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
@@ -16,6 +18,7 @@ fn main() {
     if let Err(error) = run() {
         let text = format!("OpenNetworkMonitor: {error:#}");
         eprintln!("{text}");
+        log_error!("The app could not run: {error:#}");
         if !std::env::args()
             .any(|a| a == "--diagnose" || a == "--self-test-capture" || a == "--self-test-public")
         {
@@ -47,6 +50,8 @@ fn run() -> Result<()> {
         PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
             .join("OpenNetworkMonitor");
     std::fs::create_dir_all(&data_dir)?;
+    diagnostics::init(&data_dir);
+    diagnostics::install_crash_handlers();
     let mut instance = if startup {
         let Some(instance) = capture::InstanceGuard::try_acquire()? else {
             return Ok(());
@@ -56,6 +61,29 @@ fn run() -> Result<()> {
         capture::InstanceGuard::acquire_or_replace(&data_dir)?
     };
     instance.publish(&data_dir);
+    let previous = diagnostics::begin_session(&data_dir, env!("CARGO_PKG_VERSION"));
+    log_info!(
+        "OpenNetworkMonitor {} starting (process {}{}), program {}, data folder {}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        if startup { ", at sign-in" } else { "" },
+        std::env::current_exe()
+            .map_or_else(|_| "unknown".into(), |path| path.display().to_string()),
+        data_dir.display()
+    );
+    if let diagnostics::PreviousSession::Unclean {
+        started,
+        version,
+        crash,
+    } = &previous
+    {
+        log_warn!(
+            "The previous session (version {version}, started {started}) did not end normally{}",
+            crash
+                .as_ref()
+                .map_or(String::new(), |crash| format!(": {crash}"))
+        );
+    }
     // A copy that exited while minimized saved a collapsed window; repair it before eframe reads it.
     window_state::repair_file(&data_dir.join("preferences.ron"));
     let store = open_store(&data_dir.join("usage.db"))?;
@@ -81,16 +109,27 @@ fn run() -> Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(app::MonitorApp::new(cc, store, data_dir)?))),
     )
-    .map_err(|e| anyhow::anyhow!("Could not start the interface: {e}"))?;
+    .map_err(|e| {
+        log_error!("Could not start the interface: {e}");
+        anyhow::anyhow!("Could not start the interface: {e}")
+    })?;
     Ok(())
 }
 /// Opens the history. When it cannot be opened, offers to keep the old files aside
 /// and start a new history rather than either refusing to run or silently discarding it.
 fn open_store(path: &std::path::Path) -> Result<store::Store> {
+    log_info!("Opening the history database {}", path.display());
     let error = match store::Store::open(path) {
-        Ok(store) => return Ok(store),
+        Ok(store) => {
+            log_info!(
+                "History database ready ({:.1} MB)",
+                store.file_bytes().unwrap_or(0) as f64 / 1_048_576.0
+            );
+            return Ok(store);
+        }
         Err(error) => error,
     };
+    log_error!("The history database could not be opened: {error:#}");
     // A history from a newer release is intact; replacing it would lose real data.
     if error.downcast_ref::<store::NewerVersion>().is_some() {
         return Err(error);
@@ -112,6 +151,7 @@ Move it aside and start a new history? The old files are kept next to it, named 
     }
     let label = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let moved = store::move_aside(path, &label)?;
+    log_warn!("The damaged history was moved aside to {}", moved.display());
     eprintln!("Damaged history moved to {}", moved.display());
     store::Store::open(path)
 }

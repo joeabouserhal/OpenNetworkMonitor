@@ -810,6 +810,28 @@ impl MonitorApp {
                         }
                     },
                 );
+                if let Some(log) = crate::diagnostics::log_path() {
+                    row(
+                        ui,
+                        "Log file",
+                        &format!(
+                            "{}\nWhat the app did at start and exit, and the details of any crash. It never holds traffic data.",
+                            log.display()
+                        ),
+                        130.0,
+                        |ui| {
+                            if Button::new("Show in folder")
+                                .icon(Icon::External)
+                                .variant(Variant::Outline)
+                                .size(Size::Sm)
+                                .show(ui)
+                                .clicked()
+                            {
+                                connection_tools::reveal_in_explorer(&log.display().to_string());
+                            }
+                        },
+                    );
+                }
                 if let Some(program) = program {
                     row(
                         ui,
