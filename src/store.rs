@@ -43,6 +43,22 @@ pub fn move_aside(path: &Path, label: &str) -> Result<std::path::PathBuf> {
 
 pub struct Store {
     db: Connection,
+    /// What each host used since the totals table was last written. Hosts are scattered across
+    /// that table, so updating them every second would rewrite dozens of pages a second; they
+    /// are saved together about once a minute instead, and when the store is closed.
+    hosts: std::collections::HashMap<String, HostTotal>,
+    hosts_saved: std::time::Instant,
+}
+/// Sorting and grouping a long period needs scratch space. By default SQLite puts what does not
+/// fit its small cache in a temporary file, which wrote megabytes to the disk on every refresh;
+/// keep it in memory, and give each connection a cache big enough for a period's rows.
+const READ_PRAGMAS: &str = "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192;";
+/// How long host totals are held back before they are written.
+const HOSTS_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = self.flush_hosts();
+    }
 }
 /// Old history is merged into these, and `traffic_all` reads all three as one table with the
 /// length of each row's bucket in `span`. Merged rows have no process, address or country.
@@ -74,6 +90,7 @@ impl Store {
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             PRAGMA journal_size_limit=67108864;
+            PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192;
             CREATE TABLE IF NOT EXISTS traffic (
             minute INTEGER NOT NULL, source TEXT NOT NULL, adapter_id TEXT NOT NULL,
             adapter TEXT NOT NULL, app TEXT NOT NULL, pid INTEGER NOT NULL, remote TEXT NOT NULL,
@@ -183,7 +200,14 @@ impl Store {
             )?;
             tx.commit()?;
         }
-        Ok(Self { db })
+        Ok(Self::with(db))
+    }
+    fn with(db: Connection) -> Self {
+        Self {
+            db,
+            hosts: std::collections::HashMap::new(),
+            hosts_saved: std::time::Instant::now(),
+        }
     }
     /// The time before which history may be merged: the end of the newest merged bucket.
     fn compacted_end(&self) -> Result<i64> {
@@ -464,7 +488,8 @@ impl Store {
         )
         .context("Open usage database for reading")?;
         db.busy_timeout(std::time::Duration::from_secs(3))?;
-        Ok(Some(Self { db }))
+        db.execute_batch(READ_PRAGMAS)?;
+        Ok(Some(Self::with(db)))
     }
     /// Lets another thread abort a query running on this connection.
     pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
@@ -474,6 +499,56 @@ impl Store {
         let tx = self.db.transaction()?;
         write_rows(&tx, timestamp, rows)?;
         tx.commit()?;
+        self.note_hosts(timestamp, rows);
+        self.flush_hosts()
+    }
+    /// Adds what `rows` carried to each host's running total, in memory for now.
+    fn note_hosts(&mut self, timestamp: i64, rows: &[UsageRow]) {
+        let minute = timestamp / 60 * 60;
+        for row in rows
+            .iter()
+            .filter(|row| row.source == "transport" && !row.remote.is_empty())
+        {
+            let host = self
+                .hosts
+                .entry(row.remote.clone())
+                .or_insert_with(|| HostTotal {
+                    remote: row.remote.clone(),
+                    first_seen: minute,
+                    last_seen: minute,
+                    ..Default::default()
+                });
+            host.down = host.down.saturating_add(row.down);
+            host.up = host.up.saturating_add(row.up);
+            if !row.country.is_empty() {
+                host.country.clone_from(&row.country);
+            }
+            host.first_seen = host.first_seen.min(minute);
+            host.last_seen = host.last_seen.max(minute);
+        }
+    }
+    /// Writes the held-back host totals to the table. Done at least once a minute and on exit.
+    pub fn flush_hosts(&mut self) -> Result<()> {
+        if self.hosts.is_empty() {
+            return Ok(());
+        }
+        let tx = self.db.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("INSERT INTO host_totals(remote,country,down,up,first_seen,last_seen) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(remote) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=CASE WHEN excluded.country='' THEN country ELSE excluded.country END,first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)")?;
+            for host in self.hosts.values() {
+                stmt.execute(params![
+                    host.remote,
+                    host.country,
+                    host.down,
+                    host.up,
+                    host.first_seen,
+                    host.last_seen
+                ])?;
+            }
+        }
+        tx.commit()?;
+        self.hosts.clear();
+        self.hosts_saved = std::time::Instant::now();
         Ok(())
     }
     pub fn write_capture(
@@ -505,6 +580,13 @@ impl Store {
             }
         }
         tx.commit()?;
+        for (timestamp, rows) in batches {
+            self.note_hosts(*timestamp, rows);
+        }
+        if self.hosts_saved.elapsed() >= HOSTS_SAVE_EVERY {
+            // A failure keeps the totals held back; the next minute tries again.
+            let _ = self.flush_hosts();
+        }
         Ok(())
     }
     /// Checkpoint whatever is available without waiting for readers. Committed
@@ -929,17 +1011,7 @@ impl Store {
 }
 fn write_rows(tx: &rusqlite::Transaction<'_>, timestamp: i64, rows: &[UsageRow]) -> Result<()> {
     let mut stmt=tx.prepare_cached("INSERT INTO traffic(minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(source,minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=excluded.country,adapter=excluded.adapter")?;
-    let mut host = tx.prepare_cached("INSERT INTO host_totals(remote,country,down,up,first_seen,last_seen) VALUES(?1,?2,?3,?4,?5,?5) ON CONFLICT(remote) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=CASE WHEN excluded.country='' THEN country ELSE excluded.country END,first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)")?;
     for r in rows {
-        if r.source == "transport" && !r.remote.is_empty() {
-            host.execute(params![
-                r.remote,
-                r.country,
-                r.down,
-                r.up,
-                timestamp / 60 * 60
-            ])?;
-        }
         stmt.execute(params![
             timestamp / 60 * 60,
             r.source,
@@ -1267,6 +1339,49 @@ mod tests {
     }
 
     #[test]
+    fn host_totals_are_held_back_and_saved_together_without_losing_any() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        let mut store = Store::open(&path)?;
+        let mut batches = std::collections::BTreeMap::new();
+        for second in 0..5 {
+            batches.insert(
+                600 + second,
+                vec![
+                    traffic("transport", "a.exe", "1.1.1.1", 100, 10),
+                    traffic("transport", "a.exe", "8.8.8.8", 50, 5),
+                ],
+            );
+            store.write_capture(&batches, &[])?;
+            batches.clear();
+        }
+        // The history rows are saved at once; the per-host totals wait for the next save.
+        assert!(store.host_totals(10)?.is_empty());
+        let rows: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM traffic", [], |r| r.get(0))?;
+        assert_eq!(rows, 2);
+        store.flush_hosts()?;
+        let hosts = store.host_totals(10)?;
+        assert_eq!(hosts.len(), 2);
+        assert_eq!((hosts[0].down, hosts[0].up), (500, 50));
+        // Closing the store saves what is still held back.
+        store.write_capture(
+            &std::collections::BTreeMap::from([(
+                660,
+                vec![traffic("transport", "a.exe", "1.1.1.1", 7, 1)],
+            )]),
+            &[],
+        )?;
+        drop(store);
+        let store = Store::open(&path)?;
+        let hosts = store.host_totals(10)?;
+        assert_eq!((hosts[0].down, hosts[0].up), (507, 51));
+        assert_eq!(hosts[0].last_seen, 660);
+        Ok(())
+    }
+
+    #[test]
     fn an_older_database_gets_lifetime_totals_from_its_detail() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("usage.db");
@@ -1385,6 +1500,118 @@ mod tests {
             before.0,
             hosts_after.0
         );
+        Ok(())
+    }
+
+    /// Replays the collector's write pattern against a copy of a real history and prints how many
+    /// bytes this process writes each second, so the cost of saving can be measured.
+    /// `ONM_REAL_DB` names the folder holding usage.db; `ONM_PROBE_BATCH` is how many seconds of
+    /// traffic go into each save (default 1, the current behaviour).
+    #[test]
+    #[ignore = "Needs a copy of a real history folder in ONM_REAL_DB"]
+    fn write_pattern_probe() -> Result<()> {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessIoCounters, IO_COUNTERS,
+        };
+        let written = || -> u64 {
+            // SAFETY: fills a plain struct for the current process.
+            unsafe {
+                let mut io: IO_COUNTERS = std::mem::zeroed();
+                GetProcessIoCounters(GetCurrentProcess(), &mut io);
+                io.WriteTransferCount
+            }
+        };
+        let source = std::path::PathBuf::from(std::env::var("ONM_REAL_DB")?);
+        let batch: i64 = std::env::var("ONM_PROBE_BATCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        let seconds: i64 = std::env::var("ONM_PROBE_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120);
+        let dir = tempfile::tempdir()?;
+        for entry in std::fs::read_dir(&source)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with("usage.db") {
+                std::fs::copy(entry.path(), dir.path().join(entry.file_name()))?;
+            }
+        }
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        let adapters: Vec<String> = (0..7).map(|i| format!("adapter-{i}")).collect();
+        let hosts: Vec<String> = store
+            .host_totals(400)?
+            .into_iter()
+            .map(|h| h.remote)
+            .collect();
+        let apps = [
+            "chrome.exe",
+            "steam.exe",
+            "svchost.exe",
+            "qbittorrent.exe",
+            "stremio.exe",
+        ];
+        let start = chrono::Utc::now().timestamp() / 60 * 60;
+        let mut pending = std::collections::BTreeMap::<i64, Vec<UsageRow>>::new();
+        let mut samples = Vec::<LiveTick>::new();
+        let mut per_second = Vec::new();
+        let mut last = written();
+        for second in 0..seconds {
+            let now = start + second;
+            let rows = pending.entry(now / 60 * 60).or_default();
+            for i in 0..30 {
+                rows.push(UsageRow {
+                    source: "transport".into(),
+                    adapter_id: adapters[i % 3].clone(),
+                    adapter: "x".into(),
+                    app: apps[i % apps.len()].into(),
+                    pid: 100 + (i % apps.len()) as u32,
+                    remote: hosts[(second as usize * 7 + i * 13) % hosts.len()].clone(),
+                    protocol: "TCP".into(),
+                    scope: "WAN".into(),
+                    traffic_type: "HTTPS / TLS".into(),
+                    down: 1500 * (i as u64 + 1),
+                    up: 90,
+                    ..Default::default()
+                });
+            }
+            samples.push(LiveTick {
+                timestamp: now,
+                interval: 1.0,
+                adapters: adapters.iter().map(|a| (a.clone(), (1000, 100))).collect(),
+                wifi_networks: Default::default(),
+            });
+            if (second + 1) % batch == 0 {
+                store.write_capture(&pending, &samples)?;
+                pending.clear();
+                samples.clear();
+            }
+            // One second of work, spent waiting so the log's own pattern shows.
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            let total = written();
+            per_second.push((total - last) / 1024);
+            last = total;
+        }
+        let sum: u64 = per_second.iter().sum();
+        println!("batch {batch}s: KB written per second: {per_second:?}");
+        println!(
+            "batch {batch}s: {} KB in {seconds} s = {:.0} KB/s average, {:.1} GB per day",
+            sum,
+            sum as f64 / seconds as f64,
+            sum as f64 / seconds as f64 * 86_400.0 / 1_048_576.0 / 1.0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reading_history_keeps_its_scratch_space_out_of_temporary_files() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("usage.db"))?;
+        let reader = store.open_reader()?.expect("a file database can be shared");
+        for db in [&store.db, &reader.db] {
+            let mode: i64 = db.pragma_query_value(None, "temp_store", |r| r.get(0))?;
+            assert_eq!(mode, 2, "scratch space is kept in memory");
+        }
         Ok(())
     }
 

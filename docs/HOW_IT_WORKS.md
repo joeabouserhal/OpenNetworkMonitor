@@ -88,7 +88,9 @@ Minute-by-minute history with every remote address is large: busy peer-to-peer a
 
 ## Storage reliability
 
-- Adapter samples and usage totals are committed together, using SQLite `FULL` synchronization.
+- Captured traffic is held in memory and saved to the history **every 30 seconds** (and when you pause, and on exit), not every second. Saving every second rewrote the same database pages over and over, which came to roughly 100 KB a second, around 9 GB a day, of disk writes. Saving in 30-second batches cuts that about nine times. The cost: charts and totals trail by up to 30 seconds, and a crash or power cut loses up to the last 30 seconds (the lifetime host totals are saved once a minute, so they can trail by a little more). The live speed figures are not affected.
+- Each save writes adapter samples and usage totals together, using SQLite `FULL` synchronization.
+- Reading history keeps its sorting and grouping scratch space in memory. By default SQLite spills it to a temporary file, which wrote megabytes to the disk on every refresh of the Overview and App traffic pages.
 - On a normal exit, the app stops capture, drains its buffers, saves the final partial sample, and runs a non-blocking checkpoint.
 - If another program has the database open, committed data stays in the WAL until it can be checkpointed.
 - Saved chart data loads before the first new live tick after reopening.

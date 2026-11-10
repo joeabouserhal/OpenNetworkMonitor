@@ -263,6 +263,10 @@ fn compact_now(store: &mut Store, plan: CompactionPlan) -> String {
         crate::model::format_bytes(before.saturating_sub(after) as f64)
     )
 }
+/// How long captured traffic waits in memory before it is saved to the history. Longer saves
+/// write far less to the disk, at the cost of the newest seconds being missing from charts and
+/// totals, and of losing them if the PC loses power.
+const SAVE_EVERY: Duration = Duration::from_secs(30);
 /// How many apps' last use is remembered, far more than the Overview lists.
 const RECENT_APPS_KEPT: usize = 500;
 /// The most recently used apps the Overview lists.
@@ -735,6 +739,7 @@ fn run(
     let mut pending = BTreeMap::<i64, Vec<UsageRow>>::new();
     let mut storage_failed = false;
     let mut pending_samples = Vec::<LiveTick>::new();
+    let mut last_save = Instant::now();
     let mut event_buffer = EventBuffer::default();
     // Load saved data immediately; reopening must not wait for a new live sample.
     labels.extend(
@@ -1133,36 +1138,45 @@ fn run(
                     state.cap = None;
                 }
             }
-            if !storage_failed && !recording_paused {
-                pending
-                    .entry(now / 60 * 60)
-                    .or_default()
-                    .extend(rows.iter().cloned());
-                for ((minute, ..), row) in &event_rows {
-                    pending.entry(*minute).or_default().push(row.clone());
-                }
-                match store.write_capture(&pending, &pending_samples) {
-                    Ok(()) => {
-                        let mut used = false;
-                        for (minute, batch) in &pending {
-                            for row in batch
-                                .iter()
-                                .filter(|row| row.source == "transport" && !row.app.is_empty())
-                            {
-                                let last = last_used.entry(row.app.clone()).or_insert(*minute);
-                                *last = (*last).max(*minute);
-                                used = true;
-                            }
-                        }
-                        if used {
-                            publish_recent(&shared, &last_used);
-                        }
-                        pending.clear();
-                        pending_samples.clear();
+            if !storage_failed {
+                if !recording_paused {
+                    pending
+                        .entry(now / 60 * 60)
+                        .or_default()
+                        .extend(rows.iter().cloned());
+                    for ((minute, ..), row) in &event_rows {
+                        pending.entry(*minute).or_default().push(row.clone());
                     }
-                    Err(e) => snapshot.warnings.push(format!(
-                        "History write failed; retaining samples for retry: {e}"
-                    )),
+                }
+                // Saving every second rewrites the same database pages over and over, which wears
+                // the disk. What is captured waits in memory and is saved together instead; a save
+                // is also made on pausing and on exit.
+                let due = stop || recording_paused || last_save.elapsed() >= SAVE_EVERY;
+                if due && !(pending.is_empty() && pending_samples.is_empty()) {
+                    match store.write_capture(&pending, &pending_samples) {
+                        Ok(()) => {
+                            let mut used = false;
+                            for (minute, batch) in &pending {
+                                for row in batch
+                                    .iter()
+                                    .filter(|row| row.source == "transport" && !row.app.is_empty())
+                                {
+                                    let last = last_used.entry(row.app.clone()).or_insert(*minute);
+                                    *last = (*last).max(*minute);
+                                    used = true;
+                                }
+                            }
+                            if used {
+                                publish_recent(&shared, &last_used);
+                            }
+                            pending.clear();
+                            pending_samples.clear();
+                            last_save = Instant::now();
+                        }
+                        Err(e) => snapshot.warnings.push(format!(
+                            "History write failed; retaining samples for retry: {e}"
+                        )),
+                    }
                 }
                 if pending.values().map(Vec::len).sum::<usize>() > 100_000 {
                     storage_failed = true;
@@ -1191,6 +1205,8 @@ fn run(
             // and a transactional write attempted. Don't rebuild UI snapshots,
             // reread history, or prune while exiting.
             if stop {
+                // Host totals are held back between saves; keep what they have gathered.
+                let _ = store.flush_hosts();
                 if let Err(e) = store.checkpoint() {
                     notice(&shared, format!("Final history checkpoint: {e}"));
                 }
