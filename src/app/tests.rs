@@ -639,3 +639,35 @@ fn compaction_choices_are_settings_that_reach_the_worker_plan() {
         }
     );
 }
+
+#[test]
+fn the_saved_preferences_hold_settings_and_the_window_but_not_egui_memory() {
+    use eframe::Storage as _;
+    #[derive(Default)]
+    struct Memory(std::collections::HashMap<String, String>);
+    impl eframe::Storage for Memory {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.into(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+    let ctx = egui::Context::default();
+    let mut app = MonitorApp::preview(&ctx, "overview", false);
+    assert!(!eframe::App::persist_egui_memory(&app));
+    let mut storage = Memory::default();
+    // What an older version left behind is removed.
+    storage.set_string("egui", "x".repeat(65_000));
+    eframe::App::save(&mut app, &mut storage);
+    assert_eq!(storage.get_string("egui"), None, "nothing of it is left");
+    assert!(
+        storage
+            .get_string("settings")
+            .is_some_and(|s| s.contains("tray_icon"))
+    );
+}

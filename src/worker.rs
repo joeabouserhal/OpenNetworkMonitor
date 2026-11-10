@@ -243,36 +243,36 @@ const LIFETIME_REUSE_SECONDS: i64 = 10;
 const LIFETIME_HOSTS_SHOWN: usize = 500;
 /// Unused space in the history file that is worth giving back when the app starts.
 const RECLAIM_MIN_BYTES: u64 = 32 * 1_048_576;
-/// Merges everything `plan` allows and shrinks the file, for the Compact now button. Returns
-/// what to tell the user.
-fn compact_now(store: &mut Store, plan: CompactionPlan) -> String {
-    if plan == CompactionPlan::default() {
-        return "Compaction is off. Choose how long to keep detailed history first.".into();
-    }
-    let before = store.file_bytes().unwrap_or(0);
-    let now = chrono::Utc::now().timestamp();
-    let mut merged = 0usize;
-    loop {
-        match store.compact_step(plan, now) {
-            Ok(0) => break,
-            Ok(rows) => merged += rows,
-            Err(e) => return format!("History could not be compacted: {e}"),
-        }
-    }
+/// Gives back the space merging freed, once the last slice is merged, and says what was done.
+fn finish_compaction(store: &mut Store, file_before: u64, merged: usize) -> String {
     if let Err(e) = store.reclaim() {
         return format!("History was compacted but the file could not shrink: {e}");
     }
     let after = store.file_bytes().unwrap_or(0);
     format!(
         "History compacted: {merged} rows merged, {} freed.",
-        crate::model::format_bytes(before.saturating_sub(after) as f64)
+        crate::model::format_bytes(file_before.saturating_sub(after) as f64)
     )
+}
+/// How often a period is read again: the longer it is, the more rows each read goes through and
+/// the less a few seconds of delay shows in a chart that has a point per hour or per day.
+fn refresh_every(all_time: bool, seconds: i64) -> Duration {
+    Duration::from_secs(match (all_time, seconds) {
+        (false, 0..=3600) => 1,
+        (false, 3601..=21_600) => 2,
+        (false, 21_601..=86_400) => 4,
+        (false, 86_401..=259_200) => 10,
+        (false, 259_201..=1_209_600) => 30,
+        _ => 60,
+    })
 }
 /// How often captured traffic is written to the history. Every chart, total and list reads it
 /// from memory in the meantime, so nothing lags. Saving also happens when the window goes to or
 /// comes back from the tray, on pausing, on exporting, on exit and when Windows shuts down; the
 /// only way to lose the wait is a crash or a power cut.
 const SAVE_EVERY: Duration = Duration::from_secs(300);
+/// How long after a save that failed the next try is made.
+const SAVE_RETRY: Duration = Duration::from_secs(10);
 /// Whether staged traffic should be written now.
 fn save_due(stop: bool, paused: bool, requested: bool, since_last_save: Duration) -> bool {
     stop || paused || requested || since_last_save >= SAVE_EVERY
@@ -696,6 +696,8 @@ fn run(
     let mut compaction = CompactionPlan::default();
     let mut last_compaction = Instant::now() - Duration::from_secs(3600);
     let mut compaction_busy = true;
+    // A Compact now in progress: the file's size before it, and the rows merged so far.
+    let mut compact_job: Option<(u64, usize)> = None;
     let mut lifetime = false;
     let mut window_shown = true;
     // Set when something asks for the staged traffic to be written at the next tick.
@@ -848,10 +850,19 @@ fn run(
                     }
                 }
                 Command::CompactNow => {
-                    notice(&shared, compact_now(&mut store, compaction));
-                    compaction_busy = false;
-                    last_compaction = Instant::now();
-                    refresh = true;
+                    if compaction == CompactionPlan::default() {
+                        notice(
+                            &shared,
+                            "Compaction is off. Choose how long to keep detailed history first."
+                                .into(),
+                        );
+                    } else {
+                        // Merged a slice at a time like the automatic runs, so capture keeps up;
+                        // the file shrinks when the last slice is done.
+                        compact_job = Some((store.file_bytes().unwrap_or(0), 0));
+                        compaction_busy = true;
+                        last_compaction = Instant::now() - Duration::from_secs(3600);
+                    }
                 }
                 Command::Alerts(config) => {
                     alerts = config;
@@ -1206,9 +1217,16 @@ fn run(
                             last_save = Instant::now();
                             save_requested = false;
                         }
-                        Err(e) => snapshot.warnings.push(format!(
-                            "History write failed; retaining samples for retry: {e}"
-                        )),
+                        Err(e) => {
+                            // Keep what is staged and try again soon, not on every tick.
+                            last_save = Instant::now()
+                                .checked_sub(SAVE_EVERY - SAVE_RETRY)
+                                .unwrap_or_else(Instant::now);
+                            save_requested = false;
+                            snapshot.warnings.push(format!(
+                                "History write failed; retaining samples for retry: {e}"
+                            ));
+                        }
                     }
                 }
                 if store.staged_rows() > 100_000 {
@@ -1218,17 +1236,33 @@ fn run(
             }
             if !stop
                 && last_compaction.elapsed()
-                    >= Duration::from_secs(if compaction_busy { 2 } else { 600 })
+                    >= Duration::from_secs(if compact_job.is_some() {
+                        0
+                    } else if compaction_busy {
+                        2
+                    } else {
+                        600
+                    })
             {
                 last_compaction = Instant::now();
                 match store.compact_step(compaction, now) {
-                    Ok(0) => compaction_busy = false,
-                    Ok(_) => {
+                    Ok(0) => {
+                        compaction_busy = false;
+                        if let Some((before, merged)) = compact_job.take() {
+                            notice(&shared, finish_compaction(&mut store, before, merged));
+                        }
+                        refresh = true;
+                    }
+                    Ok(rows) => {
                         compaction_busy = true;
+                        if let Some((_, merged)) = &mut compact_job {
+                            *merged += rows;
+                        }
                         refresh = true;
                     }
                     Err(e) => {
                         compaction_busy = false;
+                        compact_job = None;
                         notice(&shared, format!("History could not be compacted: {e}"));
                     }
                 }
@@ -1268,12 +1302,7 @@ fn run(
         let (start, end) = filter.time_bounds(chrono::Utc::now().timestamp());
         // Each refresh reads and sums the whole period, so a longer period is read less often.
         // Its chart has a point per minute or less, so a few seconds' delay is not visible.
-        let refresh_interval = match (filter.all_time(), end.saturating_sub(start)) {
-            (false, 0..=3600) => Duration::from_secs(1),
-            (false, 3601..=21_600) => Duration::from_secs(2),
-            (false, 21_601..=86_400) => Duration::from_secs(4),
-            _ => Duration::from_secs(5),
-        };
+        let refresh_interval = refresh_every(filter.all_time(), end.saturating_sub(start));
         // Nobody sees the charts and lists while the window is hidden, so nothing is read for them.
         if window_shown
             && ((refresh && !visible.is_empty())
@@ -1323,6 +1352,27 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].last_seen >= w[1].last_seen)
         );
+    }
+    #[test]
+    fn long_periods_are_read_less_often_and_a_failed_save_is_retried_soon() {
+        assert_eq!(refresh_every(false, 3600), Duration::from_secs(1));
+        assert_eq!(refresh_every(false, 86_400), Duration::from_secs(4));
+        assert_eq!(refresh_every(false, 3 * 86_400), Duration::from_secs(10));
+        assert_eq!(refresh_every(false, 30 * 86_400), Duration::from_secs(60));
+        assert_eq!(
+            refresh_every(true, 100),
+            Duration::from_secs(60),
+            "all time"
+        );
+        // After a failure the clock is set so the next try comes in SAVE_RETRY, not SAVE_EVERY.
+        let since_failure = SAVE_EVERY - SAVE_RETRY;
+        assert!(!save_due(
+            false,
+            false,
+            false,
+            since_failure + SAVE_RETRY / 2
+        ));
+        assert!(save_due(false, false, false, since_failure + SAVE_RETRY));
     }
     #[test]
     fn traffic_is_saved_every_five_minutes_and_whenever_something_asks() {

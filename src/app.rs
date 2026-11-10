@@ -829,8 +829,15 @@ impl eframe::App for MonitorApp {
         drop(self.tray.take());
         self.worker.shutdown();
     }
+    /// The saved file holds the settings and the window's place, not egui's own memory: that was
+    /// 65 KB of scroll positions and open areas, rewritten every 30 seconds for nothing.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "settings", &self.settings);
+        // Older versions saved egui's memory under this key; leave nothing of it behind.
+        storage.remove_string("egui");
         self.keep_window_record(storage);
     }
 }

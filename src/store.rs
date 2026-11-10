@@ -134,6 +134,14 @@ impl Drop for Store {
         }
     }
 }
+/// Ends the read transaction a consistent read opened, even if the read panics. A transaction
+/// left open would make every later read on the connection fail.
+struct ReadTransaction<'a>(&'a Connection);
+impl Drop for ReadTransaction<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.execute_batch("COMMIT");
+    }
+}
 /// Old history is merged into these, and `traffic_all` reads all three as one table with the
 /// length of each row's bucket in `span`. Merged rows have no process, address or country.
 const TIERS_SQL: &str = "
@@ -145,6 +153,14 @@ const TIERS_SQL: &str = "
         UNION ALL SELECT bucket,source,adapter_id,adapter,app,0,'','',protocol,scope,down,up,traffic_type,wifi_network,3600 FROM traffic_hourly
         UNION ALL SELECT bucket,source,adapter_id,adapter,app,0,'','',protocol,scope,down,up,traffic_type,wifi_network,86400 FROM traffic_daily;";
 
+/// The rows of a period, as stored. Every saved row is already unique, and the sums and order are
+/// worked out as they are read, so SQLite has nothing to sort and uses no scratch space.
+fn history_sql(table: &str, span: &str) -> String {
+    format!(
+        "SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network,{span}
+        FROM {table} WHERE source=?1 AND minute>=?2 AND minute<=?3"
+    )
+}
 fn db_integrity(db: &Connection) -> Result<()> {
     let integrity: String = db.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
     anyhow::ensure!(
@@ -522,8 +538,13 @@ impl Store {
     /// Gives the unused space back to the system by rewriting the file. Takes a few seconds
     /// on a large history, during which nothing else can write to it.
     pub fn reclaim(&mut self) -> Result<()> {
+        // VACUUM builds a whole copy of the file. Reads keep scratch space in memory, but this copy
+        // is as large as the history, so it goes to a temporary file instead.
         self.db
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA temp_store=FILE;")?;
+        let vacuumed = self.db.execute_batch("VACUUM;");
+        let _ = self.db.execute_batch("PRAGMA temp_store=MEMORY;");
+        vacuumed?;
         Ok(())
     }
     /// Scans the file for damage. Slow on a large history, so not part of `open`.
@@ -567,8 +588,7 @@ impl Store {
         self.consistent(|live| {
             let table = self.table_for(start / 60 * 60)?;
             let mut stmt = self.db.prepare_cached(&format!(
-                "SELECT adapter_id,SUM(down),SUM(up) FROM {table}
-                WHERE source='adapter' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id"
+                "SELECT adapter_id,down,up FROM {table} WHERE source='adapter' AND minute>=?1 AND minute<=?2"
             ))?;
             let mut total = 0u64;
             for row in stmt.query_map(params![start / 60 * 60, end], |r| {
@@ -641,24 +661,26 @@ impl Store {
         batches: &std::collections::BTreeMap<i64, Vec<UsageRow>>,
         samples: &[LiveTick],
     ) {
-        if let Ok(mut live) = self.live.lock() {
-            for (timestamp, rows) in batches {
-                live.add(timestamp / 60 * 60, rows);
-            }
-            live.samples.extend_from_slice(samples);
+        let mut live = self.lock_live();
+        for (timestamp, rows) in batches {
+            live.add(timestamp / 60 * 60, rows);
         }
+        live.samples.extend_from_slice(samples);
+    }
+    /// The unsaved traffic. A thread that panicked while holding the lock leaves plain data
+    /// behind, so the lock is taken anyway rather than losing or refusing everything after it.
+    fn lock_live(&self) -> std::sync::MutexGuard<'_, LiveBuffer> {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     /// How many unsaved rows are waiting.
     pub fn staged_rows(&self) -> usize {
-        self.live
-            .lock()
-            .map_or(0, |live| live.rows.values().map(|rows| rows.len()).sum())
+        self.lock_live().rows.values().map(|rows| rows.len()).sum()
     }
     /// Gives up what is staged, when it cannot be saved and must not grow without end.
     pub fn discard_staged(&mut self) {
-        if let Ok(mut live) = self.live.lock() {
-            *live = LiveBuffer::default();
-        }
+        *self.lock_live() = LiveBuffer::default();
     }
     /// Writes everything staged in one transaction. Reads wait for the commit, so none sees the
     /// rows twice or not at all. If the write fails nothing is lost: the rows stay staged.
@@ -666,7 +688,7 @@ impl Store {
         let live = self.live.clone();
         let mut live = live
             .lock()
-            .map_err(|_| anyhow::anyhow!("The unsaved history could not be locked"))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if live.is_empty() {
             return Ok(());
         }
@@ -724,29 +746,18 @@ impl Store {
     /// go with it. Both are fixed together, under the lock a save also holds, so a save cannot
     /// land between them.
     fn consistent<T>(&self, read: impl FnOnce(&LiveBuffer) -> Result<T>) -> Result<T> {
-        let live = {
-            let guard = self
-                .live
-                .lock()
-                .map_err(|_| anyhow::anyhow!("The unsaved history could not be locked"))?;
+        let (live, _transaction) = {
+            let guard = self.lock_live();
             self.db.execute_batch("BEGIN")?;
-            let pinned = self
-                .db
+            let transaction = ReadTransaction(&self.db);
+            // The first read is what fixes the snapshot.
+            self.db
                 .query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| {
                     r.get::<_, i64>(0)
-                })
-                .map(|_| guard.clone());
-            match pinned {
-                Ok(live) => live,
-                Err(e) => {
-                    let _ = self.db.execute_batch("COMMIT");
-                    return Err(e.into());
-                }
-            }
+                })?;
+            (guard.clone(), transaction)
         };
-        let result = read(&live);
-        let _ = self.db.execute_batch("COMMIT");
-        result
+        read(&live)
     }
     /// Checkpoint whatever is available without waiting for readers. Committed
     /// transactions remain durable in the WAL if an active reader pins frames;
@@ -796,9 +807,8 @@ impl Store {
         };
         let table = self.table_for(start)?;
         let mut stmt = self.db.prepare_cached(&format!(
-            "SELECT minute/?1*?1,adapter_id,scope,wifi_network,SUM(down),SUM(up)
-            FROM {table} WHERE source='transport' AND minute>=?2 AND minute<=?3 AND app=?4
-            GROUP BY minute/?1*?1,adapter_id,scope,wifi_network ORDER BY 1"
+            "SELECT minute/?1*?1,adapter_id,scope,wifi_network,down,up
+            FROM {table} WHERE source='transport' AND minute>=?2 AND minute<=?3 AND app=?4"
         ))?;
         let mut points = std::collections::BTreeMap::<i64, (u64, u64)>::new();
         let rows = stmt.query_map(params![step, start, end, app], |r| {
@@ -864,14 +874,8 @@ impl Store {
         let start = window_start / 60 * 60;
         // Merged tiers are only read when the period reaches back into them.
         let table = self.table_for(start)?;
-        let (span, by_span) = if table == "traffic_all" {
-            ("span", ",span")
-        } else {
-            ("60", "")
-        };
-        let mut stmt = self.db.prepare_cached(&format!("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,SUM(down),SUM(up),traffic_type,wifi_network,{span}
-            FROM {table} WHERE source=?1 AND minute>=?2 AND minute<=?3
-            GROUP BY minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network{by_span} ORDER BY minute"))?;
+        let span = if table == "traffic_all" { "span" } else { "60" };
+        let mut stmt = self.db.prepare_cached(&history_sql(table, span))?;
         let mut result = History {
             window_start,
             window_end,
@@ -1185,7 +1189,7 @@ impl Store {
     ) -> Result<TransportSummary> {
         let (start, end) = filter.time_bounds(now);
         let table = self.table_for(start / 60 * 60)?;
-        let mut stmt=self.db.prepare_cached(&format!("SELECT adapter_id,app,scope,SUM(down),SUM(up),wifi_network FROM {table} WHERE source='transport' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id,app,scope,wifi_network"))?;
+        let mut stmt=self.db.prepare_cached(&format!("SELECT adapter_id,app,scope,down,up,wifi_network FROM {table} WHERE source='transport' AND minute>=?1 AND minute<=?2"))?;
         let rows = stmt.query_map(params![start / 60 * 60, end], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -2040,6 +2044,75 @@ mod tests {
             pages, 8000,
             "pages are copied to the main file about every 32 MB"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reading_a_period_needs_no_sorting_and_so_no_scratch_space() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        for table in ["traffic", "traffic_all"] {
+            let span = if table == "traffic_all" { "span" } else { "60" };
+            let mut stmt = store
+                .db
+                .prepare(&format!("EXPLAIN QUERY PLAN {}", history_sql(table, span)))?;
+            let plan: Vec<String> = stmt
+                .query_map(["transport", "0", "100"], |r| r.get::<_, String>(3))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert!(
+                plan.iter().all(|step| !step.contains("TEMP B-TREE")),
+                "{table}: {plan:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_panic_during_a_read_does_not_break_later_reads_or_lose_staged_traffic() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let first = stage_three_minutes(&mut store);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<()> = store.consistent(|_| panic!("a read failed"));
+        }));
+        assert!(crashed.is_err());
+        let total = store
+            .history(&window(first, Source::Transport), first + 600)?
+            .down;
+        assert_eq!(total, 450, "the next read works and still sees everything");
+        // A thread that panics while holding the lock must not lock everyone else out either.
+        let live = store.live.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = live.lock().unwrap();
+            panic!("died holding the unsaved-history lock");
+        })
+        .join();
+        store.stage(
+            &std::collections::BTreeMap::from([(
+                first,
+                vec![traffic("transport", "a.exe", "1.1.1.1", 50, 5)],
+            )]),
+            &[],
+        );
+        assert_eq!(
+            store
+                .history(&window(first, Source::Transport), first + 600)?
+                .down,
+            500
+        );
+        store.save()?;
+        assert_eq!(store.staged_rows(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn shrinking_the_file_leaves_scratch_space_in_memory_again() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        ten_days(&mut store);
+        store.reclaim()?;
+        let mode: i64 = store
+            .db
+            .pragma_query_value(None, "temp_store", |r| r.get(0))?;
+        assert_eq!(mode, 2);
         Ok(())
     }
 

@@ -741,7 +741,7 @@ impl MonitorApp {
                 row(
                     ui,
                     "Compact now",
-                    "Merge old history right away and shrink the file. Takes a few seconds, and recording waits meanwhile.",
+                    "Merge old history now and shrink the file. It runs in the background, a slice at a time, and a notice says when it is done.",
                     130.0,
                     |ui| {
                         if Button::new("Compact now")
