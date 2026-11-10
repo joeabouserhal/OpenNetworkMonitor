@@ -301,6 +301,9 @@ pub struct MonitorApp {
     /// The alert choices the worker was last given.
     alerts_sent: AlertConfig,
     compaction_sent: Option<CompactionPlan>,
+    /// When the window last drew a frame. Hidden in the tray it draws none.
+    last_ui: Instant,
+    shown_sent: Option<bool>,
     /// The Hosts table shows lifetime totals rather than the period's.
     hosts_lifetime: bool,
     lifetime_sent: bool,
@@ -408,6 +411,8 @@ impl MonitorApp {
             focus_sent: None,
             alerts_sent: AlertConfig::default(),
             compaction_sent: None,
+            last_ui: Instant::now(),
+            shown_sent: None,
             hosts_lifetime: false,
             lifetime_sent: false,
             notice_seen: None,
@@ -742,6 +747,12 @@ impl eframe::App for MonitorApp {
             tray.set_color(self.settings.tray_icon_color(self.taskbar_dark));
         }
         let alerts = self.settings.alert_config();
+        // A hidden window draws nothing, so a quiet couple of seconds means it is in the tray.
+        let shown = self.last_ui.elapsed() < Duration::from_secs(2);
+        if self.shown_sent != Some(shown) {
+            let _ = self.worker.tx.send(Command::WindowShown(shown));
+            self.shown_sent = Some(shown);
+        }
         let plan = self.settings.compaction_plan();
         if self.compaction_sent != Some(plan) {
             let _ = self.worker.tx.send(Command::Compaction(plan));
@@ -777,6 +788,7 @@ impl eframe::App for MonitorApp {
         }
     }
     fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.last_ui = Instant::now();
         // Pages are laid out for a minimum logical size; keep the window from going below it
         // at whatever interface size is chosen.
         if self.min_size_for != Some(self.settings.ui_scale) {

@@ -43,21 +43,95 @@ pub fn move_aside(path: &Path, label: &str) -> Result<std::path::PathBuf> {
 
 pub struct Store {
     db: Connection,
-    /// What each host used since the totals table was last written. Hosts are scattered across
-    /// that table, so updating them every second would rewrite dozens of pages a second; they
-    /// are saved together about once a minute instead, and when the store is closed.
-    hosts: std::collections::HashMap<String, HostTotal>,
-    hosts_saved: std::time::Instant,
+    /// Traffic that has been captured but not saved yet. The read-only connections share it, so
+    /// every chart, total and list sees what was captured a moment ago.
+    live: std::sync::Arc<std::sync::Mutex<LiveBuffer>>,
+    /// Only the connection that writes saves what is left when it is closed.
+    writer: bool,
 }
 /// Sorting and grouping a long period needs scratch space. By default SQLite puts what does not
 /// fit its small cache in a temporary file, which wrote megabytes to the disk on every refresh;
-/// keep it in memory, and give each connection a cache big enough for a period's rows.
-const READ_PRAGMAS: &str = "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192;";
-/// How long host totals are held back before they are written.
-const HOSTS_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// keep it in memory. The cache is large enough for the rows of a long period, so repeated reads
+/// are served from memory while the history is not being saved.
+const READ_PRAGMAS: &str = "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-65536;";
+/// Periods up to this long are charted from the per-second samples; longer ones from the minute
+/// rows, which reads a hundred times less and charts the same shape.
+const RAW_SAMPLE_WINDOW: i64 = 7200;
+/// What identifies a saved row: source, adapter, app, process, remote address, protocol, scope,
+/// traffic type and Wi-Fi network.
+type RowKey = (
+    String,
+    String,
+    String,
+    u32,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+/// Captured traffic waiting to be saved. Saving every second rewrote the same database pages over
+/// and over and wore the disk, so it is saved rarely and read from here in the meantime.
+#[derive(Clone, Default)]
+struct LiveBuffer {
+    /// Unsaved rows merged by what identifies them, per minute.
+    rows: std::collections::BTreeMap<i64, std::collections::HashMap<RowKey, UsageRow>>,
+    samples: Vec<LiveTick>,
+    hosts: std::collections::HashMap<String, HostTotal>,
+}
+impl LiveBuffer {
+    fn add(&mut self, minute: i64, rows: &[UsageRow]) {
+        let minute_rows = self.rows.entry(minute).or_default();
+        for row in rows {
+            let key = (
+                row.source.clone(),
+                row.adapter_id.clone(),
+                row.app.clone(),
+                row.pid,
+                row.remote.clone(),
+                row.protocol.clone(),
+                row.scope.clone(),
+                row.traffic_type.clone(),
+                row.wifi_network.clone(),
+            );
+            let saved = minute_rows.entry(key).or_insert_with(|| UsageRow {
+                down: 0,
+                up: 0,
+                ..row.clone()
+            });
+            saved.down = saved.down.saturating_add(row.down);
+            saved.up = saved.up.saturating_add(row.up);
+            saved.country.clone_from(&row.country);
+            saved.adapter.clone_from(&row.adapter);
+            if row.source == "transport" && !row.remote.is_empty() {
+                let host = self
+                    .hosts
+                    .entry(row.remote.clone())
+                    .or_insert_with(|| HostTotal {
+                        remote: row.remote.clone(),
+                        first_seen: minute,
+                        last_seen: minute,
+                        ..Default::default()
+                    });
+                host.down = host.down.saturating_add(row.down);
+                host.up = host.up.saturating_add(row.up);
+                if !row.country.is_empty() {
+                    host.country.clone_from(&row.country);
+                }
+                host.first_seen = host.first_seen.min(minute);
+                host.last_seen = host.last_seen.max(minute);
+            }
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.samples.is_empty() && self.hosts.is_empty()
+    }
+}
 impl Drop for Store {
     fn drop(&mut self) {
-        let _ = self.flush_hosts();
+        if self.writer {
+            let _ = self.save();
+        }
     }
 }
 /// Old history is merged into these, and `traffic_all` reads all three as one table with the
@@ -205,8 +279,8 @@ impl Store {
     fn with(db: Connection) -> Self {
         Self {
             db,
-            hosts: std::collections::HashMap::new(),
-            hosts_saved: std::time::Instant::now(),
+            live: Default::default(),
+            writer: true,
         }
     }
     /// The time before which history may be merged: the end of the newest merged bucket.
@@ -366,12 +440,8 @@ impl Store {
     }
     /// The biggest hosts by lifetime use, however much detailed history has been merged since.
     pub fn host_totals(&self, limit: usize) -> Result<Vec<HostTotal>> {
-        let mut stmt = self.db.prepare_cached(
-            "SELECT remote,country,down,up,first_seen,last_seen FROM host_totals
-            ORDER BY down+up DESC,remote LIMIT ?1",
-        )?;
-        Ok(stmt
-            .query_map([limit as i64], |r| {
+        self.consistent(|live| {
+            let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<HostTotal> {
                 Ok(HostTotal {
                     remote: r.get(0)?,
                     country: r.get(1)?,
@@ -380,8 +450,53 @@ impl Store {
                     first_seen: r.get(4)?,
                     last_seen: r.get(5)?,
                 })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
+            };
+            let mut stmt = self.db.prepare_cached(
+                "SELECT remote,country,down,up,first_seen,last_seen FROM host_totals
+                ORDER BY down+up DESC,remote LIMIT ?1",
+            )?;
+            let mut hosts: std::collections::HashMap<String, HostTotal> = stmt
+                .query_map([(limit + live.hosts.len()) as i64], read)?
+                .map(|host| host.map(|host| (host.remote.clone(), host)))
+                .collect::<rusqlite::Result<_>>()?;
+            // Unsaved use is added on top of what is saved for the same address.
+            for host in live.hosts.values() {
+                let saved = match hosts.remove(&host.remote) {
+                    Some(saved) => Some(saved),
+                    None => self
+                        .db
+                        .query_row(
+                            "SELECT remote,country,down,up,first_seen,last_seen FROM host_totals WHERE remote=?1",
+                            [&host.remote],
+                            read,
+                        )
+                        .optional()?,
+                };
+                let merged = match saved {
+                    Some(mut saved) => {
+                        saved.down = saved.down.saturating_add(host.down);
+                        saved.up = saved.up.saturating_add(host.up);
+                        if !host.country.is_empty() {
+                            saved.country.clone_from(&host.country);
+                        }
+                        saved.first_seen = saved.first_seen.min(host.first_seen);
+                        saved.last_seen = saved.last_seen.max(host.last_seen);
+                        saved
+                    }
+                    None => host.clone(),
+                };
+                hosts.insert(merged.remote.clone(), merged);
+            }
+            let mut hosts: Vec<HostTotal> = hosts.into_values().collect();
+            hosts.sort_by(|a, b| {
+                b.down
+                    .saturating_add(b.up)
+                    .cmp(&a.down.saturating_add(a.up))
+                    .then(a.remote.cmp(&b.remote))
+            });
+            hosts.truncate(limit);
+            Ok(hosts)
+        })
     }
     /// Space inside the file that holds nothing now, for example after history was merged.
     pub fn free_bytes(&self) -> Result<u64> {
@@ -448,25 +563,35 @@ impl Store {
         end: i64,
         adapters: &std::collections::HashSet<String>,
     ) -> Result<u64> {
-        let table = self.table_for(start / 60 * 60)?;
-        let mut stmt = self.db.prepare_cached(&format!(
-            "SELECT adapter_id,SUM(down),SUM(up) FROM {table}
-            WHERE source='adapter' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id"
-        ))?;
-        let mut total = 0u64;
-        for row in stmt.query_map(params![start / 60 * 60, end], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, u64>(1)?,
-                r.get::<_, u64>(2)?,
-            ))
-        })? {
-            let (adapter, down, up) = row?;
-            if adapters.contains(&adapter) {
-                total = total.saturating_add(down).saturating_add(up);
+        self.consistent(|live| {
+            let table = self.table_for(start / 60 * 60)?;
+            let mut stmt = self.db.prepare_cached(&format!(
+                "SELECT adapter_id,SUM(down),SUM(up) FROM {table}
+                WHERE source='adapter' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id"
+            ))?;
+            let mut total = 0u64;
+            for row in stmt.query_map(params![start / 60 * 60, end], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u64>(1)?,
+                    r.get::<_, u64>(2)?,
+                ))
+            })? {
+                let (adapter, down, up) = row?;
+                if adapters.contains(&adapter) {
+                    total = total.saturating_add(down).saturating_add(up);
+                }
             }
-        }
-        Ok(total)
+            for rows in live.rows.range(start / 60 * 60..=end).map(|(_, rows)| rows) {
+                for row in rows
+                    .values()
+                    .filter(|row| row.source == "adapter" && adapters.contains(&row.adapter_id))
+                {
+                    total = total.saturating_add(row.down).saturating_add(row.up);
+                }
+            }
+            Ok(total)
+        })
     }
     /// The folder holding the database file, if it has one.
     pub fn folder(&self) -> Option<std::path::PathBuf> {
@@ -489,80 +614,69 @@ impl Store {
         .context("Open usage database for reading")?;
         db.busy_timeout(std::time::Duration::from_secs(3))?;
         db.execute_batch(READ_PRAGMAS)?;
-        Ok(Some(Self::with(db)))
+        Ok(Some(Self {
+            db,
+            live: self.live.clone(),
+            writer: false,
+        }))
     }
     /// Lets another thread abort a query running on this connection.
     pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
         self.db.get_interrupt_handle()
     }
+    /// Saves `rows` at once. The collector stages and saves in its own time; this is for tests
+    /// and one-off writes.
     pub fn write(&mut self, timestamp: i64, rows: &[UsageRow]) -> Result<()> {
-        let tx = self.db.transaction()?;
-        write_rows(&tx, timestamp, rows)?;
-        tx.commit()?;
-        self.note_hosts(timestamp, rows);
-        self.flush_hosts()
+        self.stage(
+            &std::collections::BTreeMap::from([(timestamp, rows.to_vec())]),
+            &[],
+        );
+        self.save()
     }
-    /// Adds what `rows` carried to each host's running total, in memory for now.
-    fn note_hosts(&mut self, timestamp: i64, rows: &[UsageRow]) {
-        let minute = timestamp / 60 * 60;
-        for row in rows
-            .iter()
-            .filter(|row| row.source == "transport" && !row.remote.is_empty())
-        {
-            let host = self
-                .hosts
-                .entry(row.remote.clone())
-                .or_insert_with(|| HostTotal {
-                    remote: row.remote.clone(),
-                    first_seen: minute,
-                    last_seen: minute,
-                    ..Default::default()
-                });
-            host.down = host.down.saturating_add(row.down);
-            host.up = host.up.saturating_add(row.up);
-            if !row.country.is_empty() {
-                host.country.clone_from(&row.country);
-            }
-            host.first_seen = host.first_seen.min(minute);
-            host.last_seen = host.last_seen.max(minute);
-        }
-    }
-    /// Writes the held-back host totals to the table. Done at least once a minute and on exit.
-    pub fn flush_hosts(&mut self) -> Result<()> {
-        if self.hosts.is_empty() {
-            return Ok(());
-        }
-        let tx = self.db.transaction()?;
-        {
-            let mut stmt = tx.prepare_cached("INSERT INTO host_totals(remote,country,down,up,first_seen,last_seen) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(remote) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=CASE WHEN excluded.country='' THEN country ELSE excluded.country END,first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)")?;
-            for host in self.hosts.values() {
-                stmt.execute(params![
-                    host.remote,
-                    host.country,
-                    host.down,
-                    host.up,
-                    host.first_seen,
-                    host.last_seen
-                ])?;
-            }
-        }
-        tx.commit()?;
-        self.hosts.clear();
-        self.hosts_saved = std::time::Instant::now();
-        Ok(())
-    }
-    pub fn write_capture(
+    /// Stages captured traffic. It is visible to every read at once, and written to the database
+    /// by the next `save`.
+    pub fn stage(
         &mut self,
         batches: &std::collections::BTreeMap<i64, Vec<UsageRow>>,
         samples: &[LiveTick],
-    ) -> Result<()> {
+    ) {
+        if let Ok(mut live) = self.live.lock() {
+            for (timestamp, rows) in batches {
+                live.add(timestamp / 60 * 60, rows);
+            }
+            live.samples.extend_from_slice(samples);
+        }
+    }
+    /// How many unsaved rows are waiting.
+    pub fn staged_rows(&self) -> usize {
+        self.live
+            .lock()
+            .map_or(0, |live| live.rows.values().map(|rows| rows.len()).sum())
+    }
+    /// Gives up what is staged, when it cannot be saved and must not grow without end.
+    pub fn discard_staged(&mut self) {
+        if let Ok(mut live) = self.live.lock() {
+            *live = LiveBuffer::default();
+        }
+    }
+    /// Writes everything staged in one transaction. Reads wait for the commit, so none sees the
+    /// rows twice or not at all. If the write fails nothing is lost: the rows stay staged.
+    pub fn save(&mut self) -> Result<()> {
+        let live = self.live.clone();
+        let mut live = live
+            .lock()
+            .map_err(|_| anyhow::anyhow!("The unsaved history could not be locked"))?;
+        if live.is_empty() {
+            return Ok(());
+        }
         let tx = self.db.transaction()?;
-        for (timestamp, rows) in batches {
-            write_rows(&tx, *timestamp, rows)?;
+        for (minute, rows) in &live.rows {
+            let rows: Vec<UsageRow> = rows.values().cloned().collect();
+            write_rows(&tx, *minute, &rows)?;
         }
         {
             let mut stmt=tx.prepare_cached("INSERT INTO adapter_samples(timestamp,adapter_id,down,up,elapsed,wifi_network) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(timestamp,adapter_id,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,elapsed=elapsed+excluded.elapsed")?;
-            for sample in samples {
+            for sample in &live.samples {
                 for (id, (down, up)) in &sample.adapters {
                     stmt.execute(params![
                         sample.timestamp,
@@ -579,15 +693,59 @@ impl Store {
                 }
             }
         }
+        {
+            let mut stmt = tx.prepare_cached("INSERT INTO host_totals(remote,country,down,up,first_seen,last_seen) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(remote) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=CASE WHEN excluded.country='' THEN country ELSE excluded.country END,first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)")?;
+            for host in live.hosts.values() {
+                stmt.execute(params![
+                    host.remote,
+                    host.country,
+                    host.down,
+                    host.up,
+                    host.first_seen,
+                    host.last_seen
+                ])?;
+            }
+        }
         tx.commit()?;
-        for (timestamp, rows) in batches {
-            self.note_hosts(*timestamp, rows);
-        }
-        if self.hosts_saved.elapsed() >= HOSTS_SAVE_EVERY {
-            // A failure keeps the totals held back; the next minute tries again.
-            let _ = self.flush_hosts();
-        }
+        *live = LiveBuffer::default();
         Ok(())
+    }
+    /// Stages and saves at once; used where every call should reach the disk.
+    pub fn write_capture(
+        &mut self,
+        batches: &std::collections::BTreeMap<i64, Vec<UsageRow>>,
+        samples: &[LiveTick],
+    ) -> Result<()> {
+        self.stage(batches, samples);
+        self.save()
+    }
+    /// Runs a read over one consistent view: the database as it is now, and the unsaved rows that
+    /// go with it. Both are fixed together, under the lock a save also holds, so a save cannot
+    /// land between them.
+    fn consistent<T>(&self, read: impl FnOnce(&LiveBuffer) -> Result<T>) -> Result<T> {
+        let live = {
+            let guard = self
+                .live
+                .lock()
+                .map_err(|_| anyhow::anyhow!("The unsaved history could not be locked"))?;
+            self.db.execute_batch("BEGIN")?;
+            let pinned = self
+                .db
+                .query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map(|_| guard.clone());
+            match pinned {
+                Ok(live) => live,
+                Err(e) => {
+                    let _ = self.db.execute_batch("COMMIT");
+                    return Err(e.into());
+                }
+            }
+        };
+        let result = read(&live);
+        let _ = self.db.execute_batch("COMMIT");
+        result
     }
     /// Checkpoint whatever is available without waiting for readers. Committed
     /// transactions remain durable in the WAL if an active reader pins frames;
@@ -611,6 +769,16 @@ impl Store {
         app: &str,
         now: i64,
         view: SeriesView,
+    ) -> Result<AppSeries> {
+        self.consistent(|live| self.app_series_with(filter, app, now, view, live))
+    }
+    fn app_series_with(
+        &self,
+        filter: &Filter,
+        app: &str,
+        now: i64,
+        view: SeriesView,
+        live: &LiveBuffer,
     ) -> Result<AppSeries> {
         let (mut start, end) = view.window(now).unwrap_or_else(|| filter.time_bounds(now));
         if view == SeriesView::Period && filter.all_time() {
@@ -642,15 +810,33 @@ impl Store {
                 r.get::<_, u64>(5)?,
             ))
         })?;
-        for row in rows {
-            let (at, adapter, scope, wifi, down, up) = row?;
-            let wanted = (filter.adapters.is_empty() || filter.adapters.contains(&adapter))
-                && filter.wifi_network.as_ref().is_none_or(|id| id == &wifi)
+        let mut add = |at: i64, adapter: &str, scope: &str, wifi: &str, down: u64, up: u64| {
+            let wanted = (filter.adapters.is_empty() || filter.adapters.contains(adapter))
+                && filter.wifi_network.as_ref().is_none_or(|id| id == wifi)
                 && (filter.scope == crate::model::Scope::All || filter.scope.key() == scope);
             if wanted {
                 let point = points.entry(at).or_default();
                 point.0 = point.0.saturating_add(down);
                 point.1 = point.1.saturating_add(up);
+            }
+        };
+        for row in rows {
+            let (at, adapter, scope, wifi, down, up) = row?;
+            add(at, &adapter, &scope, &wifi, down, up);
+        }
+        for (minute, rows) in live.rows.range(start..=end) {
+            for row in rows
+                .values()
+                .filter(|row| row.source == "transport" && row.app == app)
+            {
+                add(
+                    minute / step * step,
+                    &row.adapter_id,
+                    &row.scope,
+                    &row.wifi_network,
+                    row.down,
+                    row.up,
+                );
             }
         }
         Ok(AppSeries {
@@ -664,6 +850,9 @@ impl Store {
         })
     }
     pub fn history(&self, filter: &Filter, now: i64) -> Result<History> {
+        self.consistent(|live| self.history_with(filter, now, live))
+    }
+    fn history_with(&self, filter: &Filter, now: i64, live: &LiveBuffer) -> Result<History> {
         let (mut window_start, window_end) = filter.time_bounds(now);
         if filter.all_time() {
             window_start = self
@@ -713,10 +902,9 @@ impl Store {
                 },
             ))
         })?;
-        for item in iter {
-            let (minute, bucket, row) = item?;
+        let mut add = |minute: i64, bucket: i64, row: UsageRow| {
             if !filter.matches(&row) {
-                continue;
+                return;
             }
             let point = points.entry(minute).or_default();
             point.0 = point.0.saturating_add(row.down);
@@ -741,10 +929,25 @@ impl Store {
             });
             item.down = item.down.saturating_add(row.down);
             item.up = item.up.saturating_add(row.up);
+        };
+        for item in iter {
+            let (minute, bucket, row) = item?;
+            add(minute, bucket, row);
+        }
+        // What has been captured but not saved yet counts the same as what has.
+        for (minute, rows) in live.rows.range(start..=window_end) {
+            for row in rows
+                .values()
+                .filter(|row| row.source == filter.source.key())
+            {
+                add(*minute, 60, row.clone());
+            }
         }
         let mut series: Vec<(i64, u64, u64, f64, i64)> = Vec::new();
         let mut raw_minutes = std::collections::HashSet::new();
-        if filter.source == crate::model::Source::Adapter {
+        if filter.source == crate::model::Source::Adapter
+            && window_end - window_start <= RAW_SAMPLE_WINDOW
+        {
             let mut raw = self.db.prepare_cached("SELECT timestamp,adapter_id,down,up,elapsed,wifi_network FROM adapter_samples WHERE timestamp>=?1 AND timestamp<=?2 ORDER BY timestamp")?;
             // A single adapter may change networks within one second. Its
             // elapsed intervals must be added, but elapsed time across separate
@@ -775,6 +978,28 @@ impl Store {
                 entry.1 = entry.1.saturating_add(up);
                 entry.2 += elapsed;
                 raw_minutes.insert(t / 60 * 60);
+            }
+            for tick in live
+                .samples
+                .iter()
+                .filter(|tick| tick.timestamp >= window_start && tick.timestamp <= window_end)
+            {
+                for (id, (down, up)) in &tick.adapters {
+                    let wifi = tick.wifi_networks.get(id).map_or("", String::as_str);
+                    if (!filter.adapters.is_empty() && !filter.adapters.contains(id))
+                        || filter
+                            .wifi_network
+                            .as_ref()
+                            .is_some_and(|selected| selected != wifi)
+                    {
+                        continue;
+                    }
+                    let entry = by_adapter.entry((tick.timestamp, id.clone())).or_default();
+                    entry.0 = entry.0.saturating_add(*down);
+                    entry.1 = entry.1.saturating_add(*up);
+                    entry.2 += tick.interval.max(0.001);
+                    raw_minutes.insert(tick.timestamp / 60 * 60);
+                }
             }
             let mut samples = std::collections::BTreeMap::<i64, (u64, u64, f64)>::new();
             for ((t, _), (down, up, elapsed)) in by_adapter {
@@ -949,6 +1174,14 @@ impl Store {
     }
     /// Shared period/adapter rollup for the Overall Traffic footer, independent of app-page search.
     pub fn transport_summary(&self, filter: &Filter, now: i64) -> Result<TransportSummary> {
+        self.consistent(|live| self.transport_summary_with(filter, now, live))
+    }
+    fn transport_summary_with(
+        &self,
+        filter: &Filter,
+        now: i64,
+        live: &LiveBuffer,
+    ) -> Result<TransportSummary> {
         let (start, end) = filter.time_bounds(now);
         let table = self.table_for(start / 60 * 60)?;
         let mut stmt=self.db.prepare_cached(&format!("SELECT adapter_id,app,scope,SUM(down),SUM(up),wifi_network FROM {table} WHERE source='transport' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id,app,scope,wifi_network"))?;
@@ -964,31 +1197,46 @@ impl Store {
         })?;
         let mut classified = ScopeTotals::default();
         let mut apps = std::collections::BTreeMap::<String, AppUsage>::new();
-        for row in rows {
-            let (adapter, app, scope, down, up, wifi) = row?;
-            if (!filter.adapters.is_empty() && !filter.adapters.contains(&adapter))
+        let mut add = |adapter: &str, app: &str, scope: &str, down: u64, up: u64, wifi: &str| {
+            if (!filter.adapters.is_empty() && !filter.adapters.contains(adapter))
                 || filter
                     .wifi_network
                     .as_ref()
-                    .is_some_and(|selected| selected != &wifi)
+                    .is_some_and(|selected| selected != wifi)
             {
-                continue;
+                return;
             }
             let bytes = down.saturating_add(up);
-            match scope.as_str() {
+            match scope {
                 "LAN" => classified.lan = classified.lan.saturating_add(bytes),
                 "WAN" => classified.wan = classified.wan.saturating_add(bytes),
                 _ => classified.unknown = classified.unknown.saturating_add(bytes),
             }
             if app.is_empty() || bytes == 0 {
-                continue;
+                return;
             }
-            let item = apps.entry(app.clone()).or_insert_with(|| AppUsage {
-                app,
+            let item = apps.entry(app.to_owned()).or_insert_with(|| AppUsage {
+                app: app.to_owned(),
                 ..Default::default()
             });
             item.down = item.down.saturating_add(down);
             item.up = item.up.saturating_add(up);
+        };
+        for row in rows {
+            let (adapter, app, scope, down, up, wifi) = row?;
+            add(&adapter, &app, &scope, down, up, &wifi);
+        }
+        for rows in live.rows.range(start / 60 * 60..=end).map(|(_, rows)| rows) {
+            for row in rows.values().filter(|row| row.source == "transport") {
+                add(
+                    &row.adapter_id,
+                    &row.app,
+                    &row.scope,
+                    row.down,
+                    row.up,
+                    &row.wifi_network,
+                );
+            }
         }
         let mut top_apps: Vec<_> = apps.into_values().collect();
         top_apps.sort_by(|a, b| {
@@ -1338,46 +1586,202 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn host_totals_are_held_back_and_saved_together_without_losing_any() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("usage.db");
-        let mut store = Store::open(&path)?;
-        let mut batches = std::collections::BTreeMap::new();
-        for second in 0..5 {
-            batches.insert(
-                600 + second,
-                vec![
-                    traffic("transport", "a.exe", "1.1.1.1", 100, 10),
-                    traffic("transport", "a.exe", "8.8.8.8", 50, 5),
-                ],
-            );
-            store.write_capture(&batches, &[])?;
-            batches.clear();
+    fn tick(timestamp: i64, down: u64) -> LiveTick {
+        LiveTick {
+            timestamp,
+            interval: 1.0,
+            adapters: std::collections::HashMap::from([("eth".to_string(), (down, down / 10))]),
+            wifi_networks: Default::default(),
         }
-        // The history rows are saved at once; the per-host totals wait for the next save.
-        assert!(store.host_totals(10)?.is_empty());
-        let rows: i64 = store
-            .db
-            .query_row("SELECT COUNT(*) FROM traffic", [], |r| r.get(0))?;
-        assert_eq!(rows, 2);
-        store.flush_hosts()?;
-        let hosts = store.host_totals(10)?;
-        assert_eq!(hosts.len(), 2);
-        assert_eq!((hosts[0].down, hosts[0].up), (500, 50));
-        // Closing the store saves what is still held back.
-        store.write_capture(
+    }
+    /// Three minutes of traffic staged but not saved: two hosts for an app, the adapter's own
+    /// counters, and a few per-second samples.
+    fn stage_three_minutes(store: &mut Store) -> i64 {
+        let first = 1_700_000_000 / 60 * 60;
+        for minute in 0..3 {
+            let at = first + minute * 60;
+            store.stage(
+                &std::collections::BTreeMap::from([(
+                    at,
+                    vec![
+                        traffic("transport", "a.exe", "1.1.1.1", 100, 10),
+                        traffic("transport", "a.exe", "8.8.8.8", 50, 5),
+                        traffic("adapter", "", "", 150, 15),
+                    ],
+                )]),
+                &[tick(at, 150), tick(at + 1, 150)],
+            );
+        }
+        first
+    }
+    fn window(first: i64, source: Source) -> Filter {
+        Filter {
+            source,
+            time_range: Some(crate::model::TimeRange {
+                start: first,
+                end: first + 600,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn staged_traffic_is_counted_by_every_read_at_once_and_never_twice() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        let first = stage_three_minutes(&mut store);
+        let now = first + 600;
+        let rows_on_disk = |store: &Store| -> Result<i64> {
+            Ok(store
+                .db
+                .query_row("SELECT COUNT(*) FROM traffic", [], |r| r.get(0))?)
+        };
+        assert_eq!(rows_on_disk(&store)?, 0, "nothing has been written yet");
+        assert_eq!(store.staged_rows(), 9);
+
+        let read = |store: &Store| -> Result<_> {
+            let transport = store.history(&window(first, Source::Transport), now)?;
+            let adapter = store.history(&window(first, Source::Adapter), now)?;
+            let summary = store.transport_summary(&window(first, Source::Transport), now)?;
+            let used = store.adapter_usage(
+                first,
+                now,
+                &std::collections::HashSet::from(["eth".to_string()]),
+            )?;
+            let series = store.app_series(
+                &window(first, Source::Transport),
+                "a.exe",
+                now,
+                SeriesView::Period,
+            )?;
+            let hosts = store.host_totals(10)?;
+            Ok((transport, adapter, summary, used, series, hosts))
+        };
+        let (transport, adapter, summary, used, series, hosts) = read(&store)?;
+        assert_eq!((transport.down, transport.up), (3 * 150, 3 * 15));
+        assert_eq!(transport.rows.len(), 2);
+        assert_eq!((adapter.down, adapter.up), (3 * 150, 3 * 15));
+        assert!(
+            adapter.points.iter().filter(|p| p.observed).count() >= 6,
+            "the staged per-second samples are charted"
+        );
+        assert_eq!(summary.classified.wan, 3 * 165);
+        assert_eq!(summary.top_apps[0].app, "a.exe");
+        assert_eq!(used, 3 * 165);
+        assert_eq!(series.points.len(), 3);
+        assert_eq!(series.points[0].1, 150);
+        assert_eq!((hosts[0].remote.as_str(), hosts[0].down), ("1.1.1.1", 300));
+
+        // A reader shares what is staged, so the window's own reader sees it too.
+        let reader = store.open_reader()?.expect("a file database can be shared");
+        let shared = reader.history(&window(first, Source::Transport), now)?;
+        assert_eq!(shared.down, transport.down);
+
+        // Saving moves the same traffic to the disk without changing any figure.
+        store.save()?;
+        assert_eq!(store.staged_rows(), 0);
+        assert_eq!(rows_on_disk(&store)?, 9);
+        let (transport2, adapter2, summary2, used2, series2, hosts2) = read(&store)?;
+        assert_eq!(transport2.down, transport.down);
+        assert_eq!((adapter2.down, adapter2.up), (adapter.down, adapter.up));
+        assert_eq!(summary2.classified.wan, summary.classified.wan);
+        assert_eq!(used2, used);
+        assert_eq!(series2.points, series.points);
+        assert_eq!(hosts2, hosts);
+        // More traffic on top of what is saved adds to it.
+        store.stage(
             &std::collections::BTreeMap::from([(
-                660,
+                first,
                 vec![traffic("transport", "a.exe", "1.1.1.1", 7, 1)],
             )]),
             &[],
+        );
+        assert_eq!(
+            store.history(&window(first, Source::Transport), now)?.down,
+            457
+        );
+        assert_eq!(store.host_totals(10)?[0].down, 307);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_save_loses_nothing_and_is_not_counted_twice_when_it_succeeds() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        let first = stage_three_minutes(&mut store);
+        let now = first + 600;
+        store.db.execute_batch(
+            "CREATE TRIGGER fail_sample BEFORE INSERT ON adapter_samples BEGIN SELECT RAISE(ABORT,'test write failure'); END;",
         )?;
-        drop(store);
+        assert!(store.save().is_err());
+        assert_eq!(
+            store.staged_rows(),
+            9,
+            "what failed to save is still staged"
+        );
+        assert_eq!(
+            store.history(&window(first, Source::Transport), now)?.down,
+            450
+        );
+        store.db.execute_batch("DROP TRIGGER fail_sample;")?;
+        store.save()?;
+        assert_eq!(
+            store.history(&window(first, Source::Transport), now)?.down,
+            450
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn closing_the_store_saves_what_is_still_staged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        let first = {
+            let mut store = Store::open(&path)?;
+            let first = stage_three_minutes(&mut store);
+            // A reader being dropped must not save on the writer's behalf, or fail trying.
+            drop(store.open_reader()?);
+            assert_eq!(store.staged_rows(), 9);
+            first
+        };
         let store = Store::open(&path)?;
-        let hosts = store.host_totals(10)?;
-        assert_eq!((hosts[0].down, hosts[0].up), (507, 51));
-        assert_eq!(hosts[0].last_seen, 660);
+        assert_eq!(
+            store
+                .history(&window(first, Source::Transport), first + 600)?
+                .down,
+            450
+        );
+        assert_eq!(store.host_totals(10)?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn periods_over_two_hours_are_charted_from_minute_rows_not_samples() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        let first = stage_three_minutes(&mut store);
+        store.save()?;
+        let long = Filter {
+            source: Source::Adapter,
+            time_range: Some(crate::model::TimeRange {
+                start: first,
+                end: first + 3 * 3600,
+            }),
+            ..Default::default()
+        };
+        let chart = store.history(&long, first + 3 * 3600)?;
+        let spans: Vec<i64> = chart
+            .points
+            .iter()
+            .filter(|p| p.observed)
+            .map(|p| p.timestamp)
+            .collect();
+        assert_eq!(
+            spans,
+            [first, first + 60, first + 120],
+            "one point per minute"
+        );
+        assert_eq!((chart.down, chart.up), (450, 45), "the totals are the same");
         Ok(())
     }
 
@@ -1581,10 +1985,12 @@ mod tests {
                 adapters: adapters.iter().map(|a| (a.clone(), (1000, 100))).collect(),
                 wifi_networks: Default::default(),
             });
+            // Staged every second, visible at once; written to the database every `batch` seconds.
+            store.stage(&pending, &samples);
+            pending.clear();
+            samples.clear();
             if (second + 1) % batch == 0 {
-                store.write_capture(&pending, &samples)?;
-                pending.clear();
-                samples.clear();
+                store.save()?;
             }
             // One second of work, spent waiting so the log's own pattern shows.
             std::thread::sleep(std::time::Duration::from_millis(1000));
@@ -1983,9 +2389,18 @@ mod durable_chart_tests {
             wifi_networks: HashMap::new(),
         }];
         assert!(store.write_capture(&rows, &samples).is_err());
-        assert_eq!(store.history(&Filter::default(), 6010)?.down, 0);
+        // Neither the usage row nor the sample reached the database...
+        for table in ["traffic", "adapter_samples"] {
+            let saved: i64 =
+                store
+                    .db
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+            assert_eq!(saved, 0, "{table} rolled back");
+        }
+        // ...but nothing is lost: the traffic is still staged, and counted once.
+        assert_eq!(store.history(&Filter::default(), 6010)?.down, 100);
         store.db.execute_batch("DROP TRIGGER fail_sample;")?;
-        store.write_capture(&rows, &samples)?;
+        store.save()?;
         assert_eq!(store.history(&Filter::default(), 6010)?.down, 100);
         Ok(())
     }

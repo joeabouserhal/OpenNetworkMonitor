@@ -77,6 +77,8 @@ impl MonitorApp {
             pause_sent: false,
             tooltip_revision: 0,
             compaction_sent: None,
+            last_ui: Instant::now(),
+            shown_sent: None,
             hosts_lifetime: false,
             lifetime_sent: false,
             taskbar_dark: true,

@@ -64,6 +64,9 @@ pub enum Command {
     Compaction(CompactionPlan),
     /// Merge everything the plan allows right now and give the freed space back to the system.
     CompactNow,
+    /// Whether the window is on screen. Hidden in the tray, nothing is drawn, so history is not
+    /// read at all and saves are further apart.
+    WindowShown(bool),
     /// Whether the window is showing lifetime host totals, which are read only while it is.
     LifetimeHosts(bool),
     Stop,
@@ -263,10 +266,14 @@ fn compact_now(store: &mut Store, plan: CompactionPlan) -> String {
         crate::model::format_bytes(before.saturating_sub(after) as f64)
     )
 }
-/// How long captured traffic waits in memory before it is saved to the history. Longer saves
-/// write far less to the disk, at the cost of the newest seconds being missing from charts and
-/// totals, and of losing them if the PC loses power.
-const SAVE_EVERY: Duration = Duration::from_secs(30);
+/// How long captured traffic waits before it is saved while the window is open and while the app
+/// sits in the tray.
+fn save_every(window_shown: bool) -> Duration {
+    Duration::from_secs(if window_shown { 10 } else { 30 })
+}
+/// How often captured traffic is written to the history. Every chart, total and list reads it
+/// from memory in the meantime, so nothing lags; the cost of saving rarely is only that a power
+/// cut loses what was captured since the last save. Pausing and exiting save at once.
 /// How many apps' last use is remembered, far more than the Overview lists.
 const RECENT_APPS_KEPT: usize = 500;
 /// The most recently used apps the Overview lists.
@@ -687,6 +694,7 @@ fn run(
     let mut last_compaction = Instant::now() - Duration::from_secs(3600);
     let mut compaction_busy = true;
     let mut lifetime = false;
+    let mut window_shown = true;
     // When each app last used the network. Read from the history once, then kept up to date from
     // what is saved, so the Overview never has to scan the whole history for it.
     let mut last_used: HashMap<String, i64> = store
@@ -736,7 +744,6 @@ fn run(
     let mut last_prune = Instant::now() - Duration::from_secs(3600);
     let mut filter_revision = 0;
     let mut refresh = true;
-    let mut pending = BTreeMap::<i64, Vec<UsageRow>>::new();
     let mut storage_failed = false;
     let mut pending_samples = Vec::<LiveTick>::new();
     let mut last_save = Instant::now();
@@ -773,6 +780,8 @@ fn run(
                     refresh = true;
                 }
                 Command::Export(path, f) => {
+                    // The export reads the saved history, so save what is staged first.
+                    let _ = store.save();
                     let filter = effective_filter(&f, &known);
                     let now = chrono::Utc::now().timestamp();
                     // Writing a long history to disk takes seconds; keep it off the
@@ -810,6 +819,13 @@ fn run(
                         compaction_busy = true;
                         last_compaction = Instant::now() - Duration::from_secs(3600);
                     }
+                }
+                Command::WindowShown(shown) => {
+                    if shown && !window_shown {
+                        // Whatever changed while it was away is read at once.
+                        refresh = true;
+                    }
+                    window_shown = shown;
                 }
                 Command::LifetimeHosts(wanted) => {
                     if lifetime != wanted {
@@ -1140,48 +1156,48 @@ fn run(
             }
             if !storage_failed {
                 if !recording_paused {
-                    pending
+                    let mut batch = BTreeMap::<i64, Vec<UsageRow>>::new();
+                    batch
                         .entry(now / 60 * 60)
                         .or_default()
                         .extend(rows.iter().cloned());
                     for ((minute, ..), row) in &event_rows {
-                        pending.entry(*minute).or_default().push(row.clone());
+                        batch.entry(*minute).or_default().push(row.clone());
                     }
-                }
-                // Saving every second rewrites the same database pages over and over, which wears
-                // the disk. What is captured waits in memory and is saved together instead; a save
-                // is also made on pausing and on exit.
-                let due = stop || recording_paused || last_save.elapsed() >= SAVE_EVERY;
-                if due && !(pending.is_empty() && pending_samples.is_empty()) {
-                    match store.write_capture(&pending, &pending_samples) {
-                        Ok(()) => {
-                            let mut used = false;
-                            for (minute, batch) in &pending {
-                                for row in batch
-                                    .iter()
-                                    .filter(|row| row.source == "transport" && !row.app.is_empty())
-                                {
-                                    let last = last_used.entry(row.app.clone()).or_insert(*minute);
-                                    *last = (*last).max(*minute);
-                                    used = true;
-                                }
-                            }
-                            if used {
-                                publish_recent(&shared, &last_used);
-                            }
-                            pending.clear();
-                            pending_samples.clear();
-                            last_save = Instant::now();
+                    let mut used = false;
+                    for (minute, rows) in &batch {
+                        for row in rows
+                            .iter()
+                            .filter(|row| row.source == "transport" && !row.app.is_empty())
+                        {
+                            let last = last_used.entry(row.app.clone()).or_insert(*minute);
+                            *last = (*last).max(*minute);
+                            used = true;
                         }
+                    }
+                    if used {
+                        publish_recent(&shared, &last_used);
+                    }
+                    // Staged traffic is visible to every chart and total at once; it reaches
+                    // the disk with the next save.
+                    store.stage(&batch, &pending_samples);
+                }
+                pending_samples.clear();
+                // Saving every second rewrote the same database pages over and over, which wears
+                // the disk. A save is made now and then instead, and on pausing and on exit.
+                let due =
+                    stop || recording_paused || last_save.elapsed() >= save_every(window_shown);
+                if due {
+                    match store.save() {
+                        Ok(()) => last_save = Instant::now(),
                         Err(e) => snapshot.warnings.push(format!(
                             "History write failed; retaining samples for retry: {e}"
                         )),
                     }
                 }
-                if pending.values().map(Vec::len).sum::<usize>() > 100_000 {
+                if store.staged_rows() > 100_000 {
                     storage_failed = true;
-                    pending.clear();
-                    pending_samples.clear();
+                    store.discard_staged();
                 }
             }
             if !stop
@@ -1205,8 +1221,6 @@ fn run(
             // and a transactional write attempted. Don't rebuild UI snapshots,
             // reread history, or prune while exiting.
             if stop {
-                // Host totals are held back between saves; keep what they have gathered.
-                let _ = store.flush_hosts();
                 if let Err(e) = store.checkpoint() {
                     notice(&shared, format!("Final history checkpoint: {e}"));
                 }
@@ -1244,8 +1258,10 @@ fn run(
             (false, 21_601..=86_400) => Duration::from_secs(4),
             _ => Duration::from_secs(5),
         };
-        if (refresh && !visible.is_empty())
-            || (sample && last_refresh.elapsed() >= refresh_interval)
+        // Nobody sees the charts and lists while the window is hidden, so nothing is read for them.
+        if window_shown
+            && ((refresh && !visible.is_empty())
+                || (sample && last_refresh.elapsed() >= refresh_interval))
         {
             labels.extend(
                 reader
@@ -1291,6 +1307,11 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].last_seen >= w[1].last_seen)
         );
+    }
+    #[test]
+    fn saves_are_closer_together_while_the_window_is_open_than_in_the_tray() {
+        assert_eq!(save_every(true), Duration::from_secs(10));
+        assert_eq!(save_every(false), Duration::from_secs(30));
     }
     #[test]
     fn history_loads_on_its_own_thread_and_exit_does_not_wait_for_it() -> Result<()> {
