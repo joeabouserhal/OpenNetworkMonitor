@@ -165,6 +165,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             PRAGMA journal_size_limit=67108864;
             PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192;
+            PRAGMA wal_autocheckpoint=8000;
             CREATE TABLE IF NOT EXISTS traffic (
             minute INTEGER NOT NULL, source TEXT NOT NULL, adapter_id TEXT NOT NULL,
             adapter TEXT NOT NULL, app TEXT NOT NULL, pid INTEGER NOT NULL, remote TEXT NOT NULL,
@@ -1942,6 +1943,12 @@ mod tests {
             }
         }
         let mut store = Store::open(&dir.path().join("usage.db"))?;
+        if let Ok(pages) = std::env::var("ONM_PROBE_CHECKPOINT") {
+            store
+                .db
+                .execute_batch(&format!("PRAGMA wal_autocheckpoint={pages};"))?;
+        }
+        let fast = std::env::var("ONM_PROBE_FAST").is_ok();
         let adapters: Vec<String> = (0..7).map(|i| format!("adapter-{i}")).collect();
         let hosts: Vec<String> = store
             .host_totals(400)?
@@ -1993,7 +2000,9 @@ mod tests {
                 store.save()?;
             }
             // One second of work, spent waiting so the log's own pattern shows.
-            std::thread::sleep(std::time::Duration::from_millis(1000));
+            if !fast {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
             let total = written();
             per_second.push((total - last) / 1024);
             last = total;
@@ -2005,6 +2014,31 @@ mod tests {
             sum,
             sum as f64 / seconds as f64,
             sum as f64 / seconds as f64 * 86_400.0 / 1_048_576.0 / 1.0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_history_uses_write_ahead_logging_with_a_wide_checkpoint_interval() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("usage.db"))?;
+        let mode: String = store
+            .db
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+        assert_eq!(mode, "wal");
+        let sync: i64 = store
+            .db
+            .pragma_query_value(None, "synchronous", |r| r.get(0))?;
+        assert_eq!(
+            sync, 2,
+            "every save is flushed to the disk before it counts"
+        );
+        let pages: i64 = store
+            .db
+            .pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))?;
+        assert_eq!(
+            pages, 8000,
+            "pages are copied to the main file about every 32 MB"
         );
         Ok(())
     }

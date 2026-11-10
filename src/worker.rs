@@ -268,14 +268,15 @@ fn compact_now(store: &mut Store, plan: CompactionPlan) -> String {
         crate::model::format_bytes(before.saturating_sub(after) as f64)
     )
 }
-/// How long captured traffic waits before it is saved while the window is open and while the app
-/// sits in the tray.
-fn save_every(window_shown: bool) -> Duration {
-    Duration::from_secs(if window_shown { 10 } else { 30 })
-}
 /// How often captured traffic is written to the history. Every chart, total and list reads it
-/// from memory in the meantime, so nothing lags; the cost of saving rarely is only that a power
-/// cut loses what was captured since the last save. Pausing and exiting save at once.
+/// from memory in the meantime, so nothing lags. Saving also happens when the window goes to or
+/// comes back from the tray, on pausing, on exporting, on exit and when Windows shuts down; the
+/// only way to lose the wait is a crash or a power cut.
+const SAVE_EVERY: Duration = Duration::from_secs(300);
+/// Whether staged traffic should be written now.
+fn save_due(stop: bool, paused: bool, requested: bool, since_last_save: Duration) -> bool {
+    stop || paused || requested || since_last_save >= SAVE_EVERY
+}
 /// How many apps' last use is remembered, far more than the Overview lists.
 const RECENT_APPS_KEPT: usize = 500;
 /// The most recently used apps the Overview lists.
@@ -697,6 +698,8 @@ fn run(
     let mut compaction_busy = true;
     let mut lifetime = false;
     let mut window_shown = true;
+    // Set when something asks for the staged traffic to be written at the next tick.
+    let mut save_requested = false;
     // When each app last used the network. Read from the history once, then kept up to date from
     // what is saved, so the Overview never has to scan the whole history for it.
     let mut last_used: HashMap<String, i64> = store
@@ -834,6 +837,8 @@ fn run(
                         // Whatever changed while it was away is read at once.
                         refresh = true;
                     }
+                    // Going to the tray or coming back from it is a natural moment to save.
+                    save_requested = save_requested || shown != window_shown;
                     window_shown = shown;
                 }
                 Command::LifetimeHosts(wanted) => {
@@ -1194,11 +1199,13 @@ fn run(
                 pending_samples.clear();
                 // Saving every second rewrote the same database pages over and over, which wears
                 // the disk. A save is made now and then instead, and on pausing and on exit.
-                let due =
-                    stop || recording_paused || last_save.elapsed() >= save_every(window_shown);
+                let due = save_due(stop, recording_paused, save_requested, last_save.elapsed());
                 if due {
                     match store.save() {
-                        Ok(()) => last_save = Instant::now(),
+                        Ok(()) => {
+                            last_save = Instant::now();
+                            save_requested = false;
+                        }
                         Err(e) => snapshot.warnings.push(format!(
                             "History write failed; retaining samples for retry: {e}"
                         )),
@@ -1318,9 +1325,20 @@ mod tests {
         );
     }
     #[test]
-    fn saves_are_closer_together_while_the_window_is_open_than_in_the_tray() {
-        assert_eq!(save_every(true), Duration::from_secs(10));
-        assert_eq!(save_every(false), Duration::from_secs(30));
+    fn traffic_is_saved_every_five_minutes_and_whenever_something_asks() {
+        let minute = Duration::from_secs(60);
+        assert!(!save_due(false, false, false, minute));
+        assert!(!save_due(false, false, false, 4 * minute));
+        assert!(
+            save_due(false, false, false, 5 * minute),
+            "the batch is full"
+        );
+        assert!(save_due(true, false, false, Duration::ZERO), "exiting");
+        assert!(save_due(false, true, false, Duration::ZERO), "paused");
+        assert!(
+            save_due(false, false, true, Duration::ZERO),
+            "the window went to or came back from the tray"
+        );
     }
     #[test]
     fn history_loads_on_its_own_thread_and_exit_does_not_wait_for_it() -> Result<()> {
