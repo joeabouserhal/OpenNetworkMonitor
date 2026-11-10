@@ -66,6 +66,8 @@ pub fn type_description(label: &str) -> &'static str {
         _ => "Based on the connection ports",
     }
 }
+/// The Hosts line that stands for history whose per-host detail has been merged away.
+pub const MERGED_HOSTS: &str = "Merged history";
 #[derive(Debug, Default)]
 pub struct RankedUsage {
     pub label: String,
@@ -93,6 +95,18 @@ pub fn breakdown(
             || selected.is_some_and(|p| p != row.app)
         {
             continue;
+        }
+        if row.remote.is_empty() && row.pid == 0 {
+            // Merged history keeps no address; it is shown as one line so the table still adds up.
+            let merged = hosts
+                .entry(MERGED_HOSTS.into())
+                .or_insert_with(|| RankedUsage {
+                    label: MERGED_HOSTS.into(),
+                    subtitle: "Per-host detail was merged. See Lifetime totals.".into(),
+                    ..Default::default()
+                });
+            merged.down = merged.down.saturating_add(row.down);
+            merged.up = merged.up.saturating_add(row.up);
         }
         if !row.remote.is_empty() {
             let host = names
@@ -126,6 +140,9 @@ pub fn breakdown(
     let mut hosts: Vec<_> = hosts.into_values().collect();
     for h in &mut hosts {
         h.addresses.sort();
+        if h.label == MERGED_HOSTS {
+            continue;
+        }
         h.subtitle = if h.addresses.len() > 1 {
             format!("{} addresses", h.addresses.len())
         } else if h.addresses.first().is_some_and(|ip| ip != &h.label) {
@@ -161,6 +178,37 @@ mod tests {
         assert_eq!(classify("UDP", 50000, 443), "QUIC");
         assert_eq!(classify("TCP", 0, 0), "Unclassified");
     }
+    #[test]
+    fn merged_history_shows_as_one_hosts_line_so_the_table_still_adds_up() {
+        let merged = |down| UsageRow {
+            source: "transport".into(),
+            app: "a.exe".into(),
+            traffic_type: "HTTPS / TLS".into(),
+            down,
+            ..Default::default()
+        };
+        let rows = vec![
+            merged(300),
+            merged(200),
+            UsageRow {
+                pid: 5,
+                remote: "1.1.1.1".into(),
+                ..merged(40)
+            },
+        ];
+        let data = breakdown(
+            &rows,
+            &HashSet::from(["a.exe".into()]),
+            None,
+            &HashMap::new(),
+        );
+        let line = data.hosts.iter().find(|h| h.label == MERGED_HOSTS).unwrap();
+        assert_eq!(line.down, 500);
+        assert!(line.addresses.is_empty());
+        assert_eq!(data.hosts.len(), 2);
+        assert_eq!(data.types[0].down, 540, "types count the merged rows too");
+    }
+
     #[test]
     fn all_columns_share_scope_and_group_same_host_without_duplicating_bytes() {
         let rows = vec![

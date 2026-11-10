@@ -47,6 +47,42 @@ impl StorageUsage {
 }
 
 impl MonitorApp {
+    /// The lifetime host totals as table rows, named from reverse DNS when that is known.
+    pub(super) fn lifetime_rows(&self) -> Vec<crate::traffic::RankedUsage> {
+        let date = |seconds: i64| {
+            chrono::DateTime::from_timestamp(seconds, 0)
+                .map(|time| {
+                    time.with_timezone(&chrono::Local)
+                        .format("%d %b %Y")
+                        .to_string()
+                })
+                .unwrap_or_default()
+        };
+        self.data
+            .lifetime_hosts
+            .iter()
+            .map(|host| {
+                let name = self
+                    .data
+                    .snapshot
+                    .host_labels
+                    .get(&host.remote)
+                    .filter(|name| !name.is_empty() && *name != &host.remote);
+                crate::traffic::RankedUsage {
+                    label: name.cloned().unwrap_or_else(|| host.remote.clone()),
+                    subtitle: match name {
+                        Some(_) => {
+                            format!("{} \u{b7} last seen {}", host.remote, date(host.last_seen))
+                        }
+                        None => format!("Last seen {}", date(host.last_seen)),
+                    },
+                    down: host.down,
+                    up: host.up,
+                    addresses: vec![host.remote.clone()],
+                }
+            })
+            .collect()
+    }
     /// The data folder's size, measured again when it is a few seconds old.
     pub(super) fn storage_usage(&mut self) -> StorageUsage {
         const FRESH: std::time::Duration = std::time::Duration::from_secs(5);

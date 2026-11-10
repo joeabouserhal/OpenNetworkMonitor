@@ -231,6 +231,53 @@ pub struct RecentApp {
     pub app: String,
     pub last_seen: i64,
 }
+
+/// When old history is merged into coarser totals. Each layer is the age in days after which it
+/// applies; `None` leaves that layer off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompactionPlan {
+    /// Per-minute rows older than this become hourly totals, and their per-host detail is gone
+    /// (the lifetime totals per host stay).
+    pub detail_days: Option<u32>,
+    /// Hourly totals older than this become daily totals. Only applies with `detail_days`.
+    pub daily_days: Option<u32>,
+}
+impl CompactionPlan {
+    /// The times before which rows are merged into hours and into days, for `now`.
+    pub fn cutoffs(&self, now: i64) -> (Option<i64>, Option<i64>) {
+        let hours = self.detail_days.map(|days| {
+            let cut = now - i64::from(days) * 86_400;
+            cut / 3600 * 3600
+        });
+        // Days only make sense beyond the hourly layer.
+        let days = self.detail_days.and(self.daily_days).map(|days| {
+            let days = days.max(self.detail_days.unwrap_or(0) + 1);
+            local_day_start(now - i64::from(days) * 86_400)
+        });
+        (hours, days)
+    }
+}
+/// The start of the local calendar day containing `timestamp`, as a Unix time.
+pub fn local_day_start(timestamp: i64) -> i64 {
+    use chrono::TimeZone as _;
+    chrono::Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .and_then(|time| time.date_naive().and_hms_opt(0, 0, 0))
+        .and_then(|midnight| chrono::Local.from_local_datetime(&midnight).earliest())
+        .map_or(timestamp / 86_400 * 86_400, |start| start.timestamp())
+}
+/// What one remote address has used since monitoring began. Kept in a small table of its own,
+/// so it outlives the detailed history it came from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostTotal {
+    pub remote: String,
+    pub country: String,
+    pub down: u64,
+    pub up: u64,
+    pub first_seen: i64,
+    pub last_seen: i64,
+}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppUsage {
     pub app: String,

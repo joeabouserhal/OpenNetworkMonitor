@@ -31,6 +31,10 @@ pub struct Shared {
     pub cap: Option<CapStatus>,
     /// The apps that most recently used the network, kept up to date as traffic is saved.
     pub recent_apps: Vec<RecentApp>,
+    /// The biggest hosts by lifetime use, once the window has asked for them.
+    pub lifetime_hosts: Arc<Vec<HostTotal>>,
+    pub lifetime_generation: u64,
+    pub lifetime_read_at: i64,
     pub series_generation: u64,
     pub notice: String,
     pub revision: u64,
@@ -56,6 +60,12 @@ pub enum Command {
     /// The app whose timeline the window is showing, and how far back, or none.
     FocusApp(Option<(String, SeriesView)>),
     Alerts(AlertConfig),
+    /// When old history is merged into hourly and daily totals.
+    Compaction(CompactionPlan),
+    /// Merge everything the plan allows right now and give the freed space back to the system.
+    CompactNow,
+    /// Whether the window is showing lifetime host totals, which are read only while it is.
+    LifetimeHosts(bool),
     Stop,
 }
 pub struct Worker {
@@ -70,6 +80,14 @@ impl Worker {
         geo: Option<PathBuf>,
         repaint: eframe::egui::Context,
     ) -> Result<Self> {
+        // A history that was merged earlier may still hold the freed space; give it back now,
+        // before the readers and the capture have the file open.
+        let mut store = store;
+        if store.free_bytes().unwrap_or(0) >= RECLAIM_MIN_BYTES
+            && store.free_bytes().unwrap_or(0) * 5 >= store.file_bytes().unwrap_or(u64::MAX)
+        {
+            let _ = store.reclaim();
+        }
         let shared = Arc::new(Mutex::new(Shared::default()));
         let (tx, rx) = mpsc::channel();
         let state = shared.clone();
@@ -212,6 +230,38 @@ struct HistoryRequest {
     known: HashSet<String>,
     revision: u64,
     focus: Option<(String, SeriesView)>,
+    lifetime: bool,
+}
+/// How long lifetime host totals are reused before they are read again.
+const LIFETIME_REUSE_SECONDS: i64 = 10;
+/// How many hosts the lifetime list keeps.
+const LIFETIME_HOSTS_SHOWN: usize = 500;
+/// Unused space in the history file that is worth giving back when the app starts.
+const RECLAIM_MIN_BYTES: u64 = 32 * 1_048_576;
+/// Merges everything `plan` allows and shrinks the file, for the Compact now button. Returns
+/// what to tell the user.
+fn compact_now(store: &mut Store, plan: CompactionPlan) -> String {
+    if plan == CompactionPlan::default() {
+        return "Compaction is off. Choose how long to keep detailed history first.".into();
+    }
+    let before = store.file_bytes().unwrap_or(0);
+    let now = chrono::Utc::now().timestamp();
+    let mut merged = 0usize;
+    loop {
+        match store.compact_step(plan, now) {
+            Ok(0) => break,
+            Ok(rows) => merged += rows,
+            Err(e) => return format!("History could not be compacted: {e}"),
+        }
+    }
+    if let Err(e) = store.reclaim() {
+        return format!("History was compacted but the file could not shrink: {e}");
+    }
+    let after = store.file_bytes().unwrap_or(0);
+    format!(
+        "History compacted: {merged} rows merged, {} freed.",
+        crate::model::format_bytes(before.saturating_sub(after) as f64)
+    )
 }
 /// How many apps' last use is remembered, far more than the Overview lists.
 const RECENT_APPS_KEPT: usize = 500;
@@ -297,7 +347,24 @@ fn load_history(
         }
         None => None,
     };
+    let lifetime = request
+        .lifetime
+        .then(|| {
+            let stale = shared
+                .lock()
+                .ok()
+                .is_none_or(|state| now - state.lifetime_read_at >= LIFETIME_REUSE_SECONDS);
+            stale.then(|| store.host_totals(LIFETIME_HOSTS_SHOWN).unwrap_or_default())
+        })
+        .flatten();
     if let Ok(mut s) = shared.lock() {
+        if let Some(hosts) = lifetime {
+            if *s.lifetime_hosts != hosts {
+                s.lifetime_hosts = Arc::new(hosts);
+                s.lifetime_generation += 1;
+            }
+            s.lifetime_read_at = now;
+        }
         if s.app_series.as_deref() != series.as_deref() {
             s.app_series = series;
             s.series_generation += 1;
@@ -610,6 +677,12 @@ fn run(
     let mut connections = Vec::new();
     let mut visible = HashSet::new();
     let mut visibility_error = None;
+    // Old history is merged as the plan says, a slice at a time. The first passes after a plan
+    // change come quickly; once caught up the check only repeats every few minutes.
+    let mut compaction = CompactionPlan::default();
+    let mut last_compaction = Instant::now() - Duration::from_secs(3600);
+    let mut compaction_busy = true;
+    let mut lifetime = false;
     // When each app last used the network. Read from the history once, then kept up to date from
     // what is saved, so the Overview never has to scan the whole history for it.
     let mut last_used: HashMap<String, i64> = store
@@ -672,6 +745,7 @@ fn run(
                     known: known.clone(),
                     focus: focus.clone(),
                     revision: filter_revision,
+                    lifetime,
                 },
                 &store,
                 &shared,
@@ -725,6 +799,25 @@ fn run(
                 Command::ResolveHosts(addresses) => hosts.request(&addresses),
                 Command::Labels(found) => labels.extend(found),
                 Command::Pause(paused) => recording_paused = paused,
+                Command::Compaction(plan) => {
+                    if plan != compaction {
+                        compaction = plan;
+                        compaction_busy = true;
+                        last_compaction = Instant::now() - Duration::from_secs(3600);
+                    }
+                }
+                Command::LifetimeHosts(wanted) => {
+                    if lifetime != wanted {
+                        lifetime = wanted;
+                        refresh = true;
+                    }
+                }
+                Command::CompactNow => {
+                    notice(&shared, compact_now(&mut store, compaction));
+                    compaction_busy = false;
+                    last_compaction = Instant::now();
+                    refresh = true;
+                }
                 Command::Alerts(config) => {
                     alerts = config;
                     last_cap_check = Instant::now() - Duration::from_secs(3600);
@@ -1077,6 +1170,23 @@ fn run(
                     pending_samples.clear();
                 }
             }
+            if !stop
+                && last_compaction.elapsed()
+                    >= Duration::from_secs(if compaction_busy { 2 } else { 600 })
+            {
+                last_compaction = Instant::now();
+                match store.compact_step(compaction, now) {
+                    Ok(0) => compaction_busy = false,
+                    Ok(_) => {
+                        compaction_busy = true;
+                        refresh = true;
+                    }
+                    Err(e) => {
+                        compaction_busy = false;
+                        notice(&shared, format!("History could not be compacted: {e}"));
+                    }
+                }
+            }
             // The final ETW buffers and adapter sample have now been collected
             // and a transactional write attempted. Don't rebuild UI snapshots,
             // reread history, or prune while exiting.
@@ -1129,6 +1239,7 @@ fn run(
                             known: known.clone(),
                             focus: focus.clone(),
                             revision: filter_revision,
+                            lifetime,
                         },
                         &store,
                         &shared,
@@ -1192,6 +1303,7 @@ mod tests {
             known: HashSet::from(["visible".into()]),
             focus: None,
             revision,
+            lifetime: false,
         };
         assert!(
             reader.request(request(7), &store, &shared).is_none(),

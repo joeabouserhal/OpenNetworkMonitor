@@ -17,7 +17,7 @@ The usage history keeps, for every minute: the network adapter, the application'
 
 It does **not** store packet contents, web addresses, page titles, DNS query names or the host names shown in the lists. Host names are looked up when displayed and are only held in memory.
 
-History is kept until you delete it. There is no automatic expiry.
+Older history is merged on a schedule you choose in Settings → Storage: after 30 days by default, per-minute rows become hourly totals per app and adapter, and optionally daily ones later. Merging drops the process ID, remote address and country from those rows. Each remote IP address keeps one running total (bytes sent and received, first and last time seen, country) so lifetime per-host usage stays available. Nothing is ever deleted otherwise; history has no expiry and is removed only when you delete it.
 
 ## What leaves your PC
 

@@ -585,3 +585,57 @@ fn storage_usage_adds_up_the_data_folder_by_what_each_file_holds() {
         StorageUsage::default()
     );
 }
+
+#[test]
+fn the_hosts_table_switches_to_lifetime_totals_and_back() {
+    let size = Vec2::new(1440.0, 788.0);
+    let ctx = egui::Context::default();
+    let mut app = MonitorApp::preview(&ctx, "apps", false);
+    app.data.lifetime_hosts = Arc::new(vec![HostTotal {
+        remote: "203.0.113.1".into(),
+        down: 5_000_000_000,
+        up: 90_000_000,
+        first_seen: 1,
+        last_seen: 1_700_000_000,
+        ..Default::default()
+    }]);
+    let out = settle(&mut app, &ctx, size);
+    assert!(texts(&out).iter().any(|(t, _)| t == "Lifetime"));
+    click(&mut app, &ctx, size, "Lifetime");
+    assert!(app.hosts_lifetime);
+    let out = settle(&mut app, &ctx, size);
+    let shown = texts(&out);
+    assert!(shown.iter().any(|(t, _)| t == "This period"));
+    assert!(shown.iter().any(|(t, _)| t == "All-time totals per host"));
+    assert!(
+        shown.iter().any(|(t, _)| t.starts_with("203.0.113.1")),
+        "a lifetime host is listed with its address"
+    );
+    click(&mut app, &ctx, size, "This period");
+    assert!(!app.hosts_lifetime);
+}
+
+#[test]
+fn compaction_choices_are_settings_that_reach_the_worker_plan() {
+    let ctx = egui::Context::default();
+    let mut app = MonitorApp::preview(&ctx, "settings", false);
+    assert_eq!(
+        app.settings.compaction_plan(),
+        CompactionPlan {
+            detail_days: Some(30),
+            daily_days: None
+        },
+        "by default minutes are merged into hours after 30 days"
+    );
+    app.settings.detail_days = 0;
+    assert_eq!(app.settings.compaction_plan().detail_days, None);
+    app.settings.detail_days = 7;
+    app.settings.daily_days = 60;
+    assert_eq!(
+        app.settings.compaction_plan(),
+        CompactionPlan {
+            detail_days: Some(7),
+            daily_days: Some(60)
+        }
+    );
+}

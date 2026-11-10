@@ -686,6 +686,78 @@ impl MonitorApp {
                 });
                 row(
                     ui,
+                    "Detailed history",
+                    "Minute-by-minute history with every host. After this long it is merged into hourly totals per app and adapter. Each host keeps its lifetime total. Merging cannot be undone.",
+                    380.0,
+                    |ui| {
+                        let mut days = self.settings.detail_days;
+                        if tabs(
+                            ui,
+                            "detail-days",
+                            &mut days,
+                            &[
+                                (7, "7 days"),
+                                (14, "14 days"),
+                                (30, "30 days"),
+                                (90, "90 days"),
+                                (0, "Never"),
+                            ],
+                        ) {
+                            self.settings.detail_days = days;
+                            // Days must come after hours.
+                            if self.settings.daily_days != 0 && self.settings.daily_days <= days {
+                                self.settings.daily_days = [60, 180, 365]
+                                    .into_iter()
+                                    .find(|after| *after > days)
+                                    .unwrap_or(0);
+                            }
+                        }
+                    },
+                );
+                row(
+                    ui,
+                    "Daily summaries",
+                    "Merge hourly totals into daily ones after this long, which saves more space. It builds on detailed history being merged first.",
+                    340.0,
+                    |ui| {
+                        ui.add_enabled_ui(self.settings.detail_days > 0, |ui| {
+                            let mut days = self.settings.daily_days;
+                            let after = self.settings.detail_days;
+                            let options: Vec<(u32, &str)> = [
+                                (0, "Off"),
+                                (60, "60 days"),
+                                (180, "180 days"),
+                                (365, "1 year"),
+                            ]
+                            .into_iter()
+                            .filter(|(value, _)| *value == 0 || *value > after)
+                            .collect();
+                            if tabs(ui, "daily-days", &mut days, &options) {
+                                self.settings.daily_days = days;
+                            }
+                        });
+                    },
+                );
+                row(
+                    ui,
+                    "Compact now",
+                    "Merge old history right away and shrink the file. Takes a few seconds, and recording waits meanwhile.",
+                    130.0,
+                    |ui| {
+                        if Button::new("Compact now")
+                            .variant(Variant::Outline)
+                            .size(Size::Sm)
+                            .enabled(self.settings.detail_days > 0)
+                            .show(ui)
+                            .clicked()
+                        {
+                            let _ = self.worker.tx.send(Command::CompactNow);
+                            self.set_notice("Compacting history\u{2026}");
+                        }
+                    },
+                );
+                row(
+                    ui,
                     "App data folder",
                     &data_dir.display().to_string(),
                     120.0,
@@ -731,7 +803,7 @@ impl MonitorApp {
         section(
             ui,
             "History and exports",
-            "Usage history is kept until you delete it.",
+            "Usage totals are kept until you delete them. Old detail is merged under Storage.",
             |ui| {
                 block(ui, |ui| {
                     note(

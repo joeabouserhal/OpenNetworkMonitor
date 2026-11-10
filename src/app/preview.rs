@@ -76,6 +76,9 @@ impl MonitorApp {
             min_size_for: None,
             pause_sent: false,
             tooltip_revision: 0,
+            compaction_sent: None,
+            hosts_lifetime: false,
+            lifetime_sent: false,
             taskbar_dark: true,
             cap_input: "100".into(),
             breakdown_cache: Arc::default(),
@@ -121,6 +124,23 @@ impl MonitorApp {
             return;
         }
         let now = chrono::Utc::now().timestamp();
+        self.data.lifetime_hosts = Arc::new(
+            [
+                ("203.0.113.1", 612_000_000_000_u64, 9_100_000_000_u64, 3),
+                ("203.0.113.2", 48_000_000_000, 320_000_000, 12),
+                ("198.51.100.7", 6_300_000_000, 88_000_000, 31),
+                ("198.51.100.9", 910_000_000, 14_000_000, 60),
+            ]
+            .map(|(remote, down, up, days_ago)| crate::model::HostTotal {
+                remote: remote.into(),
+                country: String::new(),
+                down,
+                up,
+                first_seen: now - 90 * 86_400,
+                last_seen: now - days_ago * 86_400,
+            })
+            .to_vec(),
+        );
         let paths = PREVIEW_PATHS;
         let names = [
             "Helium",
@@ -365,6 +385,9 @@ mod render_tests {
             ("apps", "apps", false, wide, vec![], |_| {}),
             ("apps-light", "apps", true, wide, vec![], |_| {}),
             ("apps-small", "apps", false, small, vec![], |_| {}),
+            ("apps-lifetime", "apps", false, wide, vec![], |app| {
+                app.hosts_lifetime = true;
+            }),
             ("apps-timeline", "apps", false, wide, vec![], |app| {
                 select_timeline(app, false);
             }),

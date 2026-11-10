@@ -200,7 +200,7 @@ fn table_card(
     description: &str,
     count: usize,
     first_column: &str,
-    clear: Option<&mut bool>,
+    actions: impl FnOnce(&mut egui::Ui),
     body: impl FnOnce(&mut egui::Ui),
 ) {
     let t = tk(ui.ctx());
@@ -215,17 +215,7 @@ fn table_card(
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                card_header(ui, &format!("{title}  ·  {count}"), description, |ui| {
-                    if let Some(clear) = clear
-                        && Button::new("Clear selection")
-                            .variant(Variant::Ghost)
-                            .size(Size::Sm)
-                            .show(ui)
-                            .clicked()
-                    {
-                        *clear = true;
-                    }
-                });
+                card_header(ui, &format!("{title}  ·  {count}"), description, actions);
             });
         let (header, _) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), TABLE_HEADER_HEIGHT),
@@ -281,6 +271,12 @@ impl MonitorApp {
         // The three tables share the height left between the toolbar and the totals card.
         let tables = (ui.available_height() - TOTAL_CARD - GAP - PAGE_BOTTOM).max(240.0);
         let mut visible_hosts = Vec::new();
+        let mut lifetime = self.hosts_lifetime;
+        let lifetime_rows = if lifetime {
+            self.lifetime_rows()
+        } else {
+            Vec::new()
+        };
         // Always three columns side by side, whatever the window or interface size.
         {
             let third = ((width - gap * 2.0) / 3.0).floor();
@@ -288,14 +284,20 @@ impl MonitorApp {
                 ui.spacing_mut().item_spacing.x = gap;
                 cell(ui, third, |ui| self.apps_table(ui, tables, &totals));
                 cell(ui, third, |ui| {
+                    let (description, rows) = if lifetime {
+                        ("All-time totals per host", &lifetime_rows)
+                    } else {
+                        ("Reverse DNS, else address", &data.hosts)
+                    };
                     visible_hosts = self.ranked_table(
                         ui,
                         tables,
                         "Hosts",
-                        "Reverse DNS names, with addresses as fallback",
+                        description,
                         "Host",
-                        &data.hosts,
+                        rows,
                         true,
+                        Some(&mut lifetime),
                     )
                 });
                 cell(ui, third, |ui| {
@@ -307,10 +309,12 @@ impl MonitorApp {
                         "Type",
                         &data.types,
                         false,
+                        None,
                     );
                 });
             });
         }
+        self.hosts_lifetime = lifetime;
         self.apps_total_card(ui);
         if !visible_hosts.is_empty()
             && self
@@ -336,7 +340,17 @@ impl MonitorApp {
             "Select an app to focus the other tables",
             totals.len(),
             "App",
-            has_selection.then_some(&mut clear),
+            |ui| {
+                if has_selection
+                    && Button::new("Clear selection")
+                        .variant(Variant::Ghost)
+                        .size(Size::Sm)
+                        .show(ui)
+                        .clicked()
+                {
+                    clear = true;
+                }
+            },
             |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("ranked-apps")
@@ -415,7 +429,9 @@ impl MonitorApp {
         first_column: &str,
         rows: &[RankedUsage],
         hosts: bool,
+        lifetime: Option<&mut bool>,
     ) -> Vec<String> {
+        let lifetime_view = lifetime.as_deref().copied().unwrap_or(false);
         let mut unresolved = Vec::new();
         let top = rows
             .iter()
@@ -429,7 +445,19 @@ impl MonitorApp {
             description,
             rows.len(),
             first_column,
-            None,
+            |ui| {
+                if let Some(lifetime) = lifetime {
+                    let label = if *lifetime { "This period" } else { "Lifetime" };
+                    if Button::new(label)
+                        .variant(Variant::Outline)
+                        .size(Size::Sm)
+                        .show(ui)
+                        .clicked()
+                    {
+                        *lifetime = !*lifetime;
+                    }
+                }
+            },
             |ui| {
                 egui::ScrollArea::vertical()
                 .id_salt(title)
@@ -462,7 +490,14 @@ impl MonitorApp {
                         .on_hover_text(help);
                     }
                     if rows.is_empty() {
-                        layout::empty_state(ui, "No matching traffic yet.");
+                        layout::empty_state(
+                            ui,
+                            if hosts && lifetime_view {
+                                "No hosts recorded yet."
+                            } else {
+                                "No matching traffic yet."
+                            },
+                        );
                     }
                 });
             },

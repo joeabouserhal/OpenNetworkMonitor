@@ -60,36 +60,45 @@ pub fn card_header(ui: &mut Ui, title: &str, description: &str, actions: impl Fn
     let t = tk(ui.ctx());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width() - 8.0, 20.0), Sense::hover());
-            response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, title));
-            text::paint(
-                ui.painter(),
-                rect,
-                Align2::LEFT_CENTER,
-                title,
-                text::semibold(15.0),
-                t.foreground,
-            );
-            if !description.is_empty() {
-                let (rect, response) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width() - 8.0, 18.0),
-                    Sense::hover(),
-                );
-                response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, description));
-                text::paint(
-                    ui.painter(),
-                    rect,
-                    Align2::LEFT_CENTER,
-                    description,
-                    text::regular(13.5),
-                    t.muted_foreground,
-                );
-            }
+        // The actions are placed first, at the right, so the title keeps only the room left.
+        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+            actions(ui);
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let (rect, response) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width() - 8.0, 20.0),
+                        Sense::hover(),
+                    );
+                    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, title));
+                    text::paint(
+                        ui.painter(),
+                        rect,
+                        Align2::LEFT_CENTER,
+                        title,
+                        text::semibold(15.0),
+                        t.foreground,
+                    );
+                    if !description.is_empty() {
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width() - 8.0, 18.0),
+                            Sense::hover(),
+                        );
+                        response.widget_info(|| {
+                            WidgetInfo::labeled(WidgetType::Label, true, description)
+                        });
+                        text::paint(
+                            ui.painter(),
+                            rect,
+                            Align2::LEFT_CENTER,
+                            description,
+                            text::regular(13.5),
+                            t.muted_foreground,
+                        );
+                    }
+                });
+            });
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), actions);
     });
 }
 

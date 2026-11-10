@@ -78,6 +78,11 @@ struct Settings {
     /// non-administrators can change.
     accept_startup_risk: bool,
     tray_icon: TrayIconStyle,
+    /// After this many days minute-by-minute history is merged into hourly totals; 0 keeps
+    /// every minute for ever.
+    detail_days: u32,
+    /// After this many days hourly totals are merged into daily ones; 0 leaves them hourly.
+    daily_days: u32,
     geo: Option<PathBuf>,
     bits: bool,
     ui_scale: f32,
@@ -111,6 +116,14 @@ impl Settings {
         } else {
             Appearance::Dark
         })
+    }
+    /// What old history is merged into, as the worker needs it.
+    fn compaction_plan(&self) -> CompactionPlan {
+        let days = |days: u32| (days > 0).then_some(days);
+        CompactionPlan {
+            detail_days: days(self.detail_days),
+            daily_days: days(self.daily_days),
+        }
     }
     /// The tray icon's colour, or `None` for its own. The taskbar's theme decides what is
     /// visible, which can differ from the app's when the app is set to a fixed theme.
@@ -158,6 +171,8 @@ impl Default for Settings {
             close_to_tray: true,
             accept_startup_risk: false,
             tray_icon: TrayIconStyle::Default,
+            detail_days: 30,
+            daily_days: 0,
             geo: None,
             bits: false,
             ui_scale: DEFAULT_UI_SCALE,
@@ -285,6 +300,10 @@ pub struct MonitorApp {
     notice_seen: Option<(String, Instant)>,
     /// The alert choices the worker was last given.
     alerts_sent: AlertConfig,
+    compaction_sent: Option<CompactionPlan>,
+    /// The Hosts table shows lifetime totals rather than the period's.
+    hosts_lifetime: bool,
+    lifetime_sent: bool,
     /// The allowance as typed, so a half-typed number is not rewritten.
     cap_input: String,
     breakdown_cache: Arc<Breakdown>,
@@ -388,6 +407,9 @@ impl MonitorApp {
             timeline_mode: Default::default(),
             focus_sent: None,
             alerts_sent: AlertConfig::default(),
+            compaction_sent: None,
+            hosts_lifetime: false,
+            lifetime_sent: false,
             notice_seen: None,
             top_apps_view: TopAppsView::Top,
             min_size_for: None,
@@ -686,6 +708,7 @@ impl eframe::App for MonitorApp {
             if data.revision != self.data.revision
                 || data.history_generation != self.data.history_generation
                 || data.series_generation != self.data.series_generation
+                || data.lifetime_generation != self.data.lifetime_generation
                 || data.notice != self.data.notice
             {
                 self.data = data.clone();
@@ -719,6 +742,19 @@ impl eframe::App for MonitorApp {
             tray.set_color(self.settings.tray_icon_color(self.taskbar_dark));
         }
         let alerts = self.settings.alert_config();
+        let plan = self.settings.compaction_plan();
+        if self.compaction_sent != Some(plan) {
+            let _ = self.worker.tx.send(Command::Compaction(plan));
+            self.compaction_sent = Some(plan);
+        }
+        // Lifetime hosts are only read while the table showing them is on screen.
+        let lifetime = self.hosts_lifetime
+            && self.page == Page::Overview
+            && self.settings.filter.source == Source::Transport;
+        if lifetime != self.lifetime_sent {
+            let _ = self.worker.tx.send(Command::LifetimeHosts(lifetime));
+            self.lifetime_sent = lifetime;
+        }
         if alerts != self.alerts_sent {
             let _ = self.worker.tx.send(Command::Alerts(alerts));
             self.alerts_sent = alerts;

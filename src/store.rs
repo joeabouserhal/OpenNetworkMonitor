@@ -1,9 +1,10 @@
 use crate::model::{
-    Adapter, AppSeries, AppUsage, Filter, History, LiveTick, Point, RecentApp, ScopeTotals,
-    SeriesView, TransportSummary, UsageRow, WIFI_UNKNOWN, WifiNetwork,
+    Adapter, AppSeries, AppUsage, CompactionPlan, Filter, History, HostTotal, LiveTick, Point,
+    RecentApp, ScopeTotals, SeriesView, TransportSummary, UsageRow, WIFI_UNKNOWN, WifiNetwork,
+    local_day_start,
 };
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use std::path::Path;
 
 /// The database was written by a later release, so this one must not touch it.
@@ -16,7 +17,7 @@ impl std::fmt::Display for NewerVersion {
 }
 impl std::error::Error for NewerVersion {}
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Sets a database that cannot be opened aside, together with its WAL and shared
 /// memory files, so a fresh one can take its place without destroying anything.
@@ -43,6 +44,17 @@ pub fn move_aside(path: &Path, label: &str) -> Result<std::path::PathBuf> {
 pub struct Store {
     db: Connection,
 }
+/// Old history is merged into these, and `traffic_all` reads all three as one table with the
+/// length of each row's bucket in `span`. Merged rows have no process, address or country.
+const TIERS_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS traffic_hourly(bucket INTEGER NOT NULL,source TEXT NOT NULL,adapter_id TEXT NOT NULL,adapter TEXT NOT NULL,app TEXT NOT NULL,protocol TEXT NOT NULL,scope TEXT NOT NULL,traffic_type TEXT NOT NULL DEFAULT '',wifi_network TEXT NOT NULL DEFAULT '',down INTEGER NOT NULL,up INTEGER NOT NULL,PRIMARY KEY(source,bucket,adapter_id,app,protocol,scope,traffic_type,wifi_network)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS traffic_daily(bucket INTEGER NOT NULL,source TEXT NOT NULL,adapter_id TEXT NOT NULL,adapter TEXT NOT NULL,app TEXT NOT NULL,protocol TEXT NOT NULL,scope TEXT NOT NULL,traffic_type TEXT NOT NULL DEFAULT '',wifi_network TEXT NOT NULL DEFAULT '',down INTEGER NOT NULL,up INTEGER NOT NULL,PRIMARY KEY(source,bucket,adapter_id,app,protocol,scope,traffic_type,wifi_network)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS host_totals(remote TEXT PRIMARY KEY,country TEXT NOT NULL DEFAULT '',down INTEGER NOT NULL,up INTEGER NOT NULL,first_seen INTEGER NOT NULL,last_seen INTEGER NOT NULL) WITHOUT ROWID;
+    CREATE VIEW IF NOT EXISTS traffic_all AS
+        SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network,60 AS span FROM traffic
+        UNION ALL SELECT bucket,source,adapter_id,adapter,app,0,'','',protocol,scope,down,up,traffic_type,wifi_network,3600 FROM traffic_hourly
+        UNION ALL SELECT bucket,source,adapter_id,adapter,app,0,'','',protocol,scope,down,up,traffic_type,wifi_network,86400 FROM traffic_daily;";
+
 fn db_integrity(db: &Connection) -> Result<()> {
     let integrity: String = db.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
     anyhow::ensure!(
@@ -157,7 +169,222 @@ impl Store {
             // them back once, here; failing to is harmless, they are reused by new data.
             let _ = db.execute_batch("VACUUM;");
         }
+        // The coarser tiers old history is merged into, the per-host lifetime totals and the
+        // view that reads every tier as one table. Creating them is harmless on any layout.
+        db.execute_batch(TIERS_SQL)?;
+        if version < 7 {
+            // Lifetime totals start from the detail that is already saved.
+            let tx = db.transaction()?;
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO host_totals(remote,country,down,up,first_seen,last_seen)
+                    SELECT remote,MAX(country),SUM(down),SUM(up),MIN(minute),MAX(minute)
+                    FROM traffic WHERE source='transport' AND remote<>'' GROUP BY remote;
+                PRAGMA user_version=7;",
+            )?;
+            tx.commit()?;
+        }
         Ok(Self { db })
+    }
+    /// The time before which history may be merged: the end of the newest merged bucket.
+    fn compacted_end(&self) -> Result<i64> {
+        let mut end = 0;
+        for (table, span) in [("traffic_hourly", 3600), ("traffic_daily", 86_400)] {
+            for source in ["adapter", "transport"] {
+                let newest: Option<i64> = self
+                    .db
+                    .query_row(
+                        &format!(
+                            "SELECT bucket FROM {table} WHERE source=?1 ORDER BY bucket DESC LIMIT 1"
+                        ),
+                        [source],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(bucket) = newest {
+                    end = end.max(bucket + span);
+                }
+            }
+        }
+        Ok(end)
+    }
+    /// What to read a period from: the plain minute rows when it starts after everything merged,
+    /// otherwise the view over every tier, which costs a little more.
+    fn table_for(&self, start: i64) -> Result<&'static str> {
+        Ok(if start < self.compacted_end()? {
+            "traffic_all"
+        } else {
+            "traffic"
+        })
+    }
+    /// The earliest time with saved traffic for `source` up to `end`, in any tier.
+    fn oldest_minute(&self, source: &str, end: i64) -> Result<Option<i64>> {
+        let mut oldest: Option<i64> = None;
+        for (table, column) in [
+            ("traffic", "minute"),
+            ("traffic_hourly", "bucket"),
+            ("traffic_daily", "bucket"),
+        ] {
+            let found: Option<i64> = self.db.query_row(
+                &format!("SELECT MIN({column}) FROM {table} WHERE source=?1 AND {column}<=?2"),
+                params![source, end],
+                |r| r.get(0),
+            )?;
+            oldest = match (oldest, found) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        Ok(oldest)
+    }
+    /// The same for one app's traffic.
+    fn oldest_app_minute(&self, app: &str, end: i64) -> Result<Option<i64>> {
+        let mut oldest: Option<i64> = None;
+        for (table, column) in [
+            ("traffic", "minute"),
+            ("traffic_hourly", "bucket"),
+            ("traffic_daily", "bucket"),
+        ] {
+            let found: Option<i64> = self.db.query_row(
+                &format!(
+                    "SELECT MIN({column}) FROM {table} WHERE source='transport' AND app=?1 AND {column}<=?2"
+                ),
+                params![app, end],
+                |r| r.get(0),
+            )?;
+            oldest = match (oldest, found) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        Ok(oldest)
+    }
+    /// Merges one more slice of old history into coarser totals, as `plan` says, and returns how
+    /// many rows it replaced; zero means nothing is left to merge. A slice is at most a day of
+    /// minutes or a month of hours, so each call is short and the collector keeps up.
+    pub fn compact_step(&mut self, plan: CompactionPlan, now: i64) -> Result<usize> {
+        let (hours, days) = plan.cutoffs(now);
+        if let Some(cut) = hours {
+            let mut oldest: Option<i64> = None;
+            for source in ["adapter", "transport"] {
+                let found: Option<i64> = self.db.query_row(
+                    "SELECT MIN(minute) FROM traffic WHERE source=?1",
+                    [source],
+                    |r| r.get(0),
+                )?;
+                oldest = match (oldest, found) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+            if let Some(oldest) = oldest.filter(|oldest| *oldest < cut) {
+                let start = oldest / 3600 * 3600;
+                let end = (start + 86_400).min(cut);
+                return self.merge_minutes(start, end);
+            }
+        }
+        if let Some(cut) = days {
+            let oldest: Option<i64> = self.db.query_row(
+                "SELECT MIN(bucket) FROM (
+                    SELECT MIN(bucket) AS bucket FROM traffic_hourly WHERE source='adapter'
+                    UNION ALL SELECT MIN(bucket) FROM traffic_hourly WHERE source='transport')",
+                [],
+                |r| r.get(0),
+            )?;
+            if let Some(oldest) = oldest.filter(|oldest| *oldest < cut) {
+                let start = local_day_start(oldest);
+                let end = local_day_start(start + 30 * 86_400 + 43_200).min(cut);
+                return self.merge_hours(start, end);
+            }
+        }
+        Ok(0)
+    }
+    /// Replaces the minute rows in `[start, end)` with hourly totals per app and adapter. The
+    /// per-host totals were already kept as the rows were written.
+    fn merge_minutes(&mut self, start: i64, end: i64) -> Result<usize> {
+        let tx = self.db.transaction()?;
+        let mut moved = 0;
+        for source in ["adapter", "transport"] {
+            tx.execute(
+                "INSERT INTO traffic_hourly SELECT minute/3600*3600,source,adapter_id,MAX(adapter),app,protocol,scope,traffic_type,wifi_network,SUM(down),SUM(up)
+                FROM traffic WHERE source=?1 AND minute>=?2 AND minute<?3
+                GROUP BY minute/3600*3600,adapter_id,app,protocol,scope,traffic_type,wifi_network
+                ON CONFLICT DO UPDATE SET down=down+excluded.down,up=up+excluded.up",
+                params![source, start, end],
+            )?;
+            moved += tx.execute(
+                "DELETE FROM traffic WHERE source=?1 AND minute>=?2 AND minute<?3",
+                params![source, start, end],
+            )?;
+        }
+        tx.commit()?;
+        Ok(moved)
+    }
+    /// Replaces the hourly rows in `[start, end)` with daily totals, days being local calendar
+    /// days so they line up with the daily charts.
+    fn merge_hours(&mut self, start: i64, end: i64) -> Result<usize> {
+        let tx = self.db.transaction()?;
+        let mut moved = 0;
+        for source in ["adapter", "transport"] {
+            tx.execute(
+                "INSERT INTO traffic_daily SELECT CAST(strftime('%s',bucket,'unixepoch','localtime','start of day','utc') AS INTEGER),source,adapter_id,MAX(adapter),app,protocol,scope,traffic_type,wifi_network,SUM(down),SUM(up)
+                FROM traffic_hourly WHERE source=?1 AND bucket>=?2 AND bucket<?3
+                GROUP BY 1,adapter_id,app,protocol,scope,traffic_type,wifi_network
+                ON CONFLICT DO UPDATE SET down=down+excluded.down,up=up+excluded.up",
+                params![source, start, end],
+            )?;
+            moved += tx.execute(
+                "DELETE FROM traffic_hourly WHERE source=?1 AND bucket>=?2 AND bucket<?3",
+                params![source, start, end],
+            )?;
+        }
+        tx.commit()?;
+        Ok(moved)
+    }
+    /// The biggest hosts by lifetime use, however much detailed history has been merged since.
+    pub fn host_totals(&self, limit: usize) -> Result<Vec<HostTotal>> {
+        let mut stmt = self.db.prepare_cached(
+            "SELECT remote,country,down,up,first_seen,last_seen FROM host_totals
+            ORDER BY down+up DESC,remote LIMIT ?1",
+        )?;
+        Ok(stmt
+            .query_map([limit as i64], |r| {
+                Ok(HostTotal {
+                    remote: r.get(0)?,
+                    country: r.get(1)?,
+                    down: r.get(2)?,
+                    up: r.get(3)?,
+                    first_seen: r.get(4)?,
+                    last_seen: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    /// Space inside the file that holds nothing now, for example after history was merged.
+    pub fn free_bytes(&self) -> Result<u64> {
+        let free: u64 = self
+            .db
+            .pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+        let page: u64 = self
+            .db
+            .pragma_query_value(None, "page_size", |r| r.get(0))?;
+        Ok(free * page)
+    }
+    /// The size of the database file in bytes.
+    pub fn file_bytes(&self) -> Result<u64> {
+        let pages: u64 = self
+            .db
+            .pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let page: u64 = self
+            .db
+            .pragma_query_value(None, "page_size", |r| r.get(0))?;
+        Ok(pages * page)
+    }
+    /// Gives the unused space back to the system by rewriting the file. Takes a few seconds
+    /// on a large history, during which nothing else can write to it.
+    pub fn reclaim(&mut self) -> Result<()> {
+        self.db
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+        Ok(())
     }
     /// Scans the file for damage. Slow on a large history, so not part of `open`.
     pub fn integrity_check(&self) -> Result<()> {
@@ -167,7 +394,7 @@ impl Store {
     /// period or adapter filters say.
     pub fn recent_apps(&self, limit: usize) -> Result<Vec<RecentApp>> {
         let mut stmt = self.db.prepare_cached(
-            "SELECT app,MAX(minute) AS last FROM traffic WHERE source='transport' AND app<>''
+            "SELECT app,MAX(minute) AS last FROM traffic_all WHERE source='transport' AND app<>''
             GROUP BY app ORDER BY last DESC,app LIMIT ?1",
         )?;
         Ok(stmt
@@ -181,9 +408,11 @@ impl Store {
     }
     /// Every app that has ever been recorded as using the network.
     pub fn known_apps(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self
-            .db
-            .prepare("SELECT DISTINCT app FROM traffic WHERE source='transport'")?;
+        let mut stmt = self.db.prepare(
+            "SELECT app FROM traffic WHERE source='transport'
+                UNION SELECT app FROM traffic_hourly WHERE source='transport'
+                UNION SELECT app FROM traffic_daily WHERE source='transport'",
+        )?;
         Ok(stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?)
@@ -195,10 +424,11 @@ impl Store {
         end: i64,
         adapters: &std::collections::HashSet<String>,
     ) -> Result<u64> {
-        let mut stmt = self.db.prepare_cached(
-            "SELECT adapter_id,SUM(down),SUM(up) FROM traffic
-            WHERE source='adapter' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id",
-        )?;
+        let table = self.table_for(start / 60 * 60)?;
+        let mut stmt = self.db.prepare_cached(&format!(
+            "SELECT adapter_id,SUM(down),SUM(up) FROM {table}
+            WHERE source='adapter' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id"
+        ))?;
         let mut total = 0u64;
         for row in stmt.query_map(params![start / 60 * 60, end], |r| {
             Ok((
@@ -303,12 +533,7 @@ impl Store {
         let (mut start, end) = view.window(now).unwrap_or_else(|| filter.time_bounds(now));
         if view == SeriesView::Period && filter.all_time() {
             start = self
-                .db
-                .query_row(
-                    "SELECT MIN(minute) FROM traffic WHERE source='transport' AND app=?1 AND minute<=?2",
-                    params![app, end],
-                    |row| row.get::<_, Option<i64>>(0),
-                )?
+                .oldest_app_minute(app, end)?
                 .unwrap_or(end.saturating_sub(3600));
         }
         let start = start / 60 * 60;
@@ -318,11 +543,12 @@ impl Store {
         } else {
             60
         };
-        let mut stmt = self.db.prepare_cached(
+        let table = self.table_for(start)?;
+        let mut stmt = self.db.prepare_cached(&format!(
             "SELECT minute/?1*?1,adapter_id,scope,wifi_network,SUM(down),SUM(up)
-            FROM traffic WHERE source='transport' AND minute>=?2 AND minute<=?3 AND app=?4
-            GROUP BY minute/?1*?1,adapter_id,scope,wifi_network ORDER BY 1",
-        )?;
+            FROM {table} WHERE source='transport' AND minute>=?2 AND minute<=?3 AND app=?4
+            GROUP BY minute/?1*?1,adapter_id,scope,wifi_network ORDER BY 1"
+        ))?;
         let mut points = std::collections::BTreeMap::<i64, (u64, u64)>::new();
         let rows = stmt.query_map(params![step, start, end, app], |r| {
             Ok((
@@ -359,25 +585,27 @@ impl Store {
         let (mut window_start, window_end) = filter.time_bounds(now);
         if filter.all_time() {
             window_start = self
-                .db
-                .query_row(
-                    "SELECT MIN(minute) FROM traffic WHERE source=?1 AND minute<=?2",
-                    params![filter.source.key(), window_end],
-                    |row| row.get::<_, Option<i64>>(0),
-                )?
+                .oldest_minute(filter.source.key(), window_end)?
                 .unwrap_or(window_end.saturating_sub(3600));
         }
         // Totals use complete minute buckets, consistently across every view.
         let start = window_start / 60 * 60;
-        let mut stmt = self.db.prepare_cached("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,SUM(down),SUM(up),traffic_type,wifi_network
-            FROM traffic WHERE source=?1 AND minute>=?2 AND minute<=?3
-            GROUP BY minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network ORDER BY minute")?;
+        // Merged tiers are only read when the period reaches back into them.
+        let table = self.table_for(start)?;
+        let (span, by_span) = if table == "traffic_all" {
+            ("span", ",span")
+        } else {
+            ("60", "")
+        };
+        let mut stmt = self.db.prepare_cached(&format!("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,SUM(down),SUM(up),traffic_type,wifi_network,{span}
+            FROM {table} WHERE source=?1 AND minute>=?2 AND minute<=?3
+            GROUP BY minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network{by_span} ORDER BY minute"))?;
         let mut result = History {
             window_start,
             window_end,
             ..Default::default()
         };
-        let mut points = std::collections::BTreeMap::<i64, (u64, u64)>::new();
+        let mut points = std::collections::BTreeMap::<i64, (u64, u64, i64)>::new();
         let mut totals = std::collections::BTreeMap::<
             (String, String, u32, String, String, String, String, String),
             UsageRow,
@@ -385,6 +613,7 @@ impl Store {
         let iter = stmt.query_map(params![filter.source.key(), start, window_end], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
+                r.get::<_, i64>(14)?,
                 UsageRow {
                     source: r.get(1)?,
                     adapter_id: r.get(2)?,
@@ -403,13 +632,14 @@ impl Store {
             ))
         })?;
         for item in iter {
-            let (minute, row) = item?;
+            let (minute, bucket, row) = item?;
             if !filter.matches(&row) {
                 continue;
             }
             let point = points.entry(minute).or_default();
             point.0 = point.0.saturating_add(row.down);
             point.1 = point.1.saturating_add(row.up);
+            point.2 = bucket;
             result.down = result.down.saturating_add(row.down);
             result.up = result.up.saturating_add(row.up);
             let key = (
@@ -477,9 +707,9 @@ impl Store {
                     .map(|(t, (d, u, elapsed))| (t, d, u, elapsed, 1)),
             );
         }
-        for (minute, (down, up)) in points {
+        for (minute, (down, up, bucket)) in points {
             if !raw_minutes.contains(&minute) {
-                series.push((minute, down, up, 60.0, 60));
+                series.push((minute, down, up, bucket as f64, bucket));
             }
         }
         result.points = plot_series(series, window_start, window_end);
@@ -492,7 +722,9 @@ impl Store {
     pub fn export(&self, path: &Path, filter: &Filter, now: i64) -> Result<usize> {
         let (start, end) = filter.time_bounds(now);
         let start = start / 60 * 60;
-        let mut stmt = self.db.prepare("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network FROM traffic WHERE source=?1 AND minute>=?2 AND minute<=?3 ORDER BY minute")?;
+        let table = self.table_for(start)?;
+        let span = if table == "traffic_all" { "span" } else { "60" };
+        let mut stmt = self.db.prepare(&format!("SELECT minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network,{span} FROM {table} WHERE source=?1 AND minute>=?2 AND minute<=?3 ORDER BY minute"))?;
         // create_new prevents accidental overwrite or a partial replacement of an existing export.
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -515,6 +747,7 @@ impl Store {
             "upload_bytes",
             "traffic_type",
             "wifi_network",
+            "bucket_seconds",
         ])?;
         let wifi_names: std::collections::HashMap<String, String> = self
             .known_wifi_networks()?
@@ -525,6 +758,7 @@ impl Store {
         let rows = stmt.query_map(params![filter.source.key(), start, end], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
+                r.get::<_, i64>(14)?,
                 UsageRow {
                     source: r.get(1)?,
                     adapter_id: r.get(2)?,
@@ -543,7 +777,7 @@ impl Store {
             ))
         })?;
         for row in rows {
-            let (minute, r) = row?;
+            let (minute, bucket, r) = row?;
             if !filter.matches(&r) {
                 continue;
             }
@@ -572,6 +806,7 @@ impl Store {
                         .map(String::as_str)
                         .unwrap_or(r.wifi_network.as_str())
                 }),
+                bucket.to_string(),
             ])?;
             count += 1;
         }
@@ -632,8 +867,9 @@ impl Store {
     }
     /// Shared period/adapter rollup for the Overall Traffic footer, independent of app-page search.
     pub fn transport_summary(&self, filter: &Filter, now: i64) -> Result<TransportSummary> {
-        let mut stmt=self.db.prepare_cached("SELECT adapter_id,app,scope,SUM(down),SUM(up),wifi_network FROM traffic WHERE source='transport' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id,app,scope,wifi_network")?;
         let (start, end) = filter.time_bounds(now);
+        let table = self.table_for(start / 60 * 60)?;
+        let mut stmt=self.db.prepare_cached(&format!("SELECT adapter_id,app,scope,SUM(down),SUM(up),wifi_network FROM {table} WHERE source='transport' AND minute>=?1 AND minute<=?2 GROUP BY adapter_id,app,scope,wifi_network"))?;
         let rows = stmt.query_map(params![start / 60 * 60, end], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -693,7 +929,17 @@ impl Store {
 }
 fn write_rows(tx: &rusqlite::Transaction<'_>, timestamp: i64, rows: &[UsageRow]) -> Result<()> {
     let mut stmt=tx.prepare_cached("INSERT INTO traffic(minute,source,adapter_id,adapter,app,pid,remote,country,protocol,scope,down,up,traffic_type,wifi_network) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(source,minute,adapter_id,app,pid,remote,protocol,scope,traffic_type,wifi_network) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=excluded.country,adapter=excluded.adapter")?;
+    let mut host = tx.prepare_cached("INSERT INTO host_totals(remote,country,down,up,first_seen,last_seen) VALUES(?1,?2,?3,?4,?5,?5) ON CONFLICT(remote) DO UPDATE SET down=down+excluded.down,up=up+excluded.up,country=CASE WHEN excluded.country='' THEN country ELSE excluded.country END,first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)")?;
     for r in rows {
+        if r.source == "transport" && !r.remote.is_empty() {
+            host.execute(params![
+                r.remote,
+                r.country,
+                r.down,
+                r.up,
+                timestamp / 60 * 60
+            ])?;
+        }
         stmt.execute(params![
             timestamp / 60 * 60,
             r.source,
@@ -822,6 +1068,345 @@ mod tests {
         );
         Ok(())
     }
+    fn traffic(source: &str, app: &str, remote: &str, down: u64, up: u64) -> UsageRow {
+        UsageRow {
+            source: source.into(),
+            adapter_id: "eth".into(),
+            adapter: "Ethernet".into(),
+            app: app.into(),
+            pid: 77,
+            remote: remote.into(),
+            country: if remote.is_empty() { "" } else { "XX" }.into(),
+            protocol: "TCP".into(),
+            scope: "WAN".into(),
+            traffic_type: "HTTPS / TLS".into(),
+            down,
+            up,
+            ..Default::default()
+        }
+    }
+    /// Ten days of traffic starting on a day boundary: every minute of the first two hours of
+    /// each day, from two hosts, plus the adapter's own counters.
+    fn ten_days(store: &mut Store) -> i64 {
+        let first = 1_700_000_000 / 86_400 * 86_400;
+        for day in 0..10 {
+            for minute in 0..120 {
+                let at = first + day * 86_400 + minute * 60;
+                store
+                    .write(
+                        at,
+                        &[
+                            traffic("transport", "a.exe", "1.1.1.1", 100, 10),
+                            traffic("transport", "a.exe", "8.8.8.8", 50, 5),
+                            traffic("adapter", "", "", 150, 15),
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+        first
+    }
+
+    #[test]
+    fn merging_minutes_into_hours_keeps_totals_charts_and_exports() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let first = ten_days(&mut store);
+        let now = first + 11 * 86_400;
+        let filter = Filter {
+            source: Source::Transport,
+            time_range: Some(crate::model::TimeRange {
+                start: first,
+                end: now,
+            }),
+            ..Default::default()
+        };
+        let before = store.history(&filter, now)?;
+        assert_eq!((before.down, before.up), (10 * 120 * 150, 10 * 120 * 15));
+        let plan = CompactionPlan {
+            detail_days: Some(3),
+            daily_days: None,
+        };
+        let mut moved = 0;
+        while let rows @ 1.. = store.compact_step(plan, now)? {
+            moved += rows;
+        }
+        assert!(moved > 0, "old minutes were merged");
+        let (hours, _) = plan.cutoffs(now);
+        let left: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM traffic WHERE minute<?1",
+            [hours.unwrap()],
+            |r| r.get(0),
+        )?;
+        assert_eq!(left, 0, "nothing old stays as minutes");
+        let after = store.history(&filter, now)?;
+        assert_eq!((after.down, after.up), (before.down, before.up));
+        assert!(
+            after.rows.iter().any(|r| r.remote.is_empty()),
+            "merged rows have no host"
+        );
+        // An hour holding 60 minutes of 150 bytes reads as bytes per second over that hour.
+        let early = after
+            .points
+            .iter()
+            .find(|p| p.observed && p.timestamp == first)
+            .expect("the first hour is charted");
+        assert_eq!(early.down, (60 * 150) / 3600);
+        assert_eq!(store.compact_step(plan, now)?, 0, "nothing is left to do");
+        // A recent period reads the minute rows alone.
+        let recent = store.history(
+            &Filter {
+                source: Source::Transport,
+                time_range: Some(crate::model::TimeRange {
+                    start: first + 9 * 86_400,
+                    end: now,
+                }),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(recent.down, 120 * 150);
+        // The export carries merged rows and says how wide each bucket is.
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("out.csv");
+        let rows = store.export(&path, &filter, now)?;
+        let text = std::fs::read_to_string(&path)?;
+        assert!(text.lines().next().unwrap().ends_with("bucket_seconds"));
+        assert!(text.lines().any(|line| line.ends_with(",3600")));
+        assert!(text.lines().any(|line| line.ends_with(",60")));
+        assert_eq!(text.lines().count(), rows + 1);
+        // The data cap's use of the adapter counts merged hours too.
+        let used = store.adapter_usage(
+            first,
+            now,
+            &std::collections::HashSet::from(["eth".to_string()]),
+        )?;
+        assert_eq!(used, 10 * 120 * (150 + 15));
+        Ok(())
+    }
+
+    #[test]
+    fn merging_hours_into_days_lines_up_with_local_days() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let first = ten_days(&mut store);
+        let now = first + 11 * 86_400;
+        let plan = CompactionPlan {
+            detail_days: Some(2),
+            daily_days: Some(5),
+        };
+        while store.compact_step(plan, now)? > 0 {}
+        let (_, days) = plan.cutoffs(now);
+        let days = days.unwrap();
+        let stray: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM traffic_hourly WHERE bucket<?1",
+            [days],
+            |r| r.get(0),
+        )?;
+        assert_eq!(stray, 0, "old hours became days");
+        let buckets: Vec<i64> = {
+            let mut q = store
+                .db
+                .prepare("SELECT DISTINCT bucket FROM traffic_daily ORDER BY bucket")?;
+            q.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        assert!(!buckets.is_empty());
+        for bucket in &buckets {
+            assert_eq!(
+                *bucket,
+                local_day_start(*bucket),
+                "a day starts at local midnight"
+            );
+        }
+        // A period starts on a merged bucket's first second to count it whole.
+        let filter = Filter {
+            source: Source::Transport,
+            time_range: Some(crate::model::TimeRange {
+                start: local_day_start(first),
+                end: now,
+            }),
+            ..Default::default()
+        };
+        let all = store.history(&filter, now)?;
+        assert_eq!(
+            all.down,
+            10 * 120 * 150,
+            "no byte is lost across three tiers"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lifetime_host_totals_outlive_the_detail_they_came_from() -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let first = ten_days(&mut store);
+        let now = first + 11 * 86_400;
+        let plan = CompactionPlan {
+            detail_days: Some(1),
+            daily_days: None,
+        };
+        while store.compact_step(plan, now)? > 0 {}
+        let hosts = store.host_totals(10)?;
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].remote, "1.1.1.1");
+        assert_eq!(
+            (hosts[0].down, hosts[0].up),
+            (10 * 120 * 100, 10 * 120 * 10)
+        );
+        assert_eq!(hosts[0].country, "XX");
+        assert_eq!(hosts[0].first_seen, first);
+        assert_eq!(hosts[0].last_seen, first + 9 * 86_400 + 119 * 60);
+        assert_eq!(hosts[1].remote, "8.8.8.8");
+        // The old per-host rows really are gone from the history tables.
+        let detail: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM traffic WHERE minute<?1 AND remote<>''",
+            [plan.cutoffs(now).0.unwrap()],
+            |r| r.get(0),
+        )?;
+        assert_eq!(detail, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_older_database_gets_lifetime_totals_from_its_detail() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage.db");
+        {
+            let mut store = Store::open(&path)?;
+            store.write(600, &[traffic("transport", "a.exe", "9.9.9.9", 400, 40)])?;
+            store.write(660, &[traffic("transport", "a.exe", "9.9.9.9", 100, 10)])?;
+            // Back to the layout before lifetime totals.
+            store
+                .db
+                .execute_batch("DELETE FROM host_totals; PRAGMA user_version=6;")?;
+        }
+        let store = Store::open(&path)?;
+        let hosts = store.host_totals(5)?;
+        assert_eq!(hosts.len(), 1);
+        assert_eq!((hosts[0].down, hosts[0].up), (500, 50));
+        assert_eq!((hosts[0].first_seen, hosts[0].last_seen), (600, 660));
+        Ok(())
+    }
+
+    #[test]
+    fn the_daily_layer_needs_the_hourly_layer_and_starts_after_it() {
+        let now = 1_800_000_000;
+        let plan = CompactionPlan {
+            detail_days: Some(30),
+            daily_days: Some(10),
+        };
+        let (hours, days) = plan.cutoffs(now);
+        assert_eq!(hours, Some((now - 30 * 86_400) / 3600 * 3600));
+        assert!(
+            days.unwrap() < hours.unwrap(),
+            "days reach further back than hours"
+        );
+        let alone = CompactionPlan {
+            detail_days: None,
+            daily_days: Some(60),
+        };
+        assert_eq!(alone.cutoffs(now), (None, None));
+        assert_eq!(CompactionPlan::default().cutoffs(now), (None, None));
+    }
+
+    /// Runs the whole migration and compaction on a copy of a real history, to see that nothing
+    /// is lost and how long it takes. `ONM_REAL_DB` names the folder holding usage.db.
+    #[test]
+    #[ignore = "Needs a copy of a real history folder in ONM_REAL_DB"]
+    fn a_real_history_migrates_and_compacts_without_losing_a_byte() -> Result<()> {
+        let source = std::path::PathBuf::from(std::env::var("ONM_REAL_DB")?);
+        let dir = tempfile::tempdir()?;
+        for entry in std::fs::read_dir(&source)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("usage.db") {
+                std::fs::copy(entry.path(), dir.path().join(&name))?;
+            }
+        }
+        let started = std::time::Instant::now();
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        println!("opened and migrated in {:?}", started.elapsed());
+        let sums = |store: &Store| -> Result<(u64, u64, u64, u64)> {
+            let by = |source: &str| -> Result<(u64, u64)> {
+                Ok(store.db.query_row(
+                    "SELECT COALESCE(SUM(down),0),COALESCE(SUM(up),0) FROM traffic_all WHERE source=?1",
+                    [source],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            };
+            let (td, tu) = by("transport")?;
+            let (ad, au) = by("adapter")?;
+            Ok((td, tu, ad, au))
+        };
+        let before = sums(&store)?;
+        let hosts_before: (u64, u64) = store.db.query_row(
+            "SELECT COALESCE(SUM(down),0),COALESCE(SUM(up),0) FROM host_totals",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let file_before = store.file_bytes()?;
+        let now = chrono::Utc::now().timestamp();
+        let plan = CompactionPlan {
+            detail_days: Some(7),
+            daily_days: Some(60),
+        };
+        let started = std::time::Instant::now();
+        let mut steps = 0;
+        let mut rows = 0;
+        loop {
+            let moved = store.compact_step(plan, now)?;
+            if moved == 0 {
+                break;
+            }
+            steps += 1;
+            rows += moved;
+        }
+        println!(
+            "compacted {rows} rows in {steps} steps, {:?}",
+            started.elapsed()
+        );
+        assert_eq!(sums(&store)?, before, "no byte lost in any tier");
+        let started = std::time::Instant::now();
+        store.reclaim()?;
+        println!(
+            "reclaimed in {:?}: {:.1} MB -> {:.1} MB",
+            started.elapsed(),
+            file_before as f64 / 1e6,
+            store.file_bytes()? as f64 / 1e6
+        );
+        let hosts_after: (u64, u64) = store.db.query_row(
+            "SELECT COALESCE(SUM(down),0),COALESCE(SUM(up),0) FROM host_totals",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(hosts_after, hosts_before, "lifetime host totals untouched");
+        println!(
+            "hosts {}, transport {} bytes down, host totals {} bytes down",
+            store.host_totals(1_000_000)?.len(),
+            before.0,
+            hosts_after.0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reclaiming_space_shrinks_a_database_after_history_is_merged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        let first = ten_days(&mut store);
+        let big = store.file_bytes()?;
+        let now = first + 11 * 86_400;
+        let plan = CompactionPlan {
+            detail_days: Some(1),
+            daily_days: None,
+        };
+        while store.compact_step(plan, now)? > 0 {}
+        assert!(store.free_bytes()? > 0, "merged rows leave unused pages");
+        store.reclaim()?;
+        assert_eq!(store.free_bytes()?, 0);
+        assert!(store.file_bytes()? < big, "the file got smaller");
+        Ok(())
+    }
+
     #[test]
     fn spreadsheet_formulas_escaped() {
         assert_eq!(csv_safe("=bad"), "'=bad");
@@ -1242,7 +1827,7 @@ mod service_history_tests {
             store
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-            6
+            SCHEMA_VERSION
         );
         assert_eq!(
             store
@@ -1354,7 +1939,7 @@ mod wifi_history_tests {
             store
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-            6
+            SCHEMA_VERSION
         );
         assert_eq!(
             store
@@ -1865,7 +2450,7 @@ mod layout_tests {
             store
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-            6
+            SCHEMA_VERSION
         );
         Ok(())
     }

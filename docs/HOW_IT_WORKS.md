@@ -69,6 +69,23 @@ Different sources measure different things, so read this before comparing figure
 - **Freeze** pauses only the chart. Recording, range totals, and live speed keep going.
 - Country lookups apply to newly captured traffic and are approximate.
 
+## History tiers
+
+Minute-by-minute history with every remote address is large: busy peer-to-peer and streaming apps add thousands of addresses a day. So old history is merged in steps, which you control in **Settings → Storage**.
+
+| Age | What is kept | Per-host detail |
+| --- | --- | --- |
+| Newer than **Detailed history** (default 30 days) | One row per minute, app, adapter, remote address, protocol, type and Wi-Fi network | Yes |
+| Older, merged into **hours** | One row per hour, app, adapter, protocol, type and Wi-Fi network | No |
+| Older still, optionally merged into **days** (60 days, 180 days or 1 year) | The same, per local calendar day | No |
+
+- **Totals never change.** Merging adds rows together, so every app, adapter and total figure, the charts and the data cap read the same before and after. A merged hour or day charts as an average rate across it.
+- **Lifetime host totals.** Every remote address keeps a running total (bytes down and up, when first and last seen, country) in a small table that merging never touches. The Hosts card's **Lifetime** button lists them. They are for all traffic, so they ignore the period, adapter and app filters.
+- **Merged history in the Hosts card** appears as one *Merged history* line, so the table still adds up.
+- **Periods start on a bucket.** A period that begins in the middle of a merged hour or day leaves that hour or day out, as the chart already leaves out partial minutes.
+- **Merging cannot be undone,** and nothing is deleted except the per-address rows it replaces. CSV exports carry a `bucket_seconds` column (60, 3600 or 86400) saying how wide each row's time bucket is.
+- **When it runs.** A slice of at most a day is merged every couple of seconds until the history is caught up, then the app checks every ten minutes. **Compact now** does it all at once and shrinks the file. The file is also shrunk at launch when a third or more of it is unused.
+
 ## Storage reliability
 
 - Adapter samples and usage totals are committed together, using SQLite `FULL` synchronization.
