@@ -23,6 +23,8 @@ The script checks formatting, runs tests and strict Clippy, builds a release, an
 
 The script only writes to project-local folders. It doesn't install toolchains or change system settings. Compiling doesn't need administrator access.
 
+**Releasing.** CI publishes a release when a push to `main` carries a `Cargo.toml` version that has no release yet. Before pushing, add a section for the new version to the top of `CHANGELOG.md` (`## 0.6.1`, then Added, Changed and Fixed lists) and bump the version in `Cargo.toml` and `app.manifest` (a test checks that they match). The release notes on GitHub are that section, plus a link comparing it with the version below it. Editing a section later and pushing updates the notes of the release that already exists.
+
 <details>
 <summary>Using Cargo directly</summary>
 
