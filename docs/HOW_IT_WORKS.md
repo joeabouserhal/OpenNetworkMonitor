@@ -75,7 +75,7 @@ Minute-by-minute history with every remote address is large: busy peer-to-peer a
 
 | Age | What is kept | Per-host detail |
 | --- | --- | --- |
-| Newer than **Detailed history** (default 30 days) | One row per minute, app, adapter, remote address, protocol, type and Wi-Fi network | Yes |
+| Within **Detailed history** (default 30 days, up to a month longer) | One row per minute, app, adapter, remote address, protocol, type and Wi-Fi network | Yes |
 | Older, merged into **hours** | One row per hour, app, adapter, protocol, type and Wi-Fi network | No |
 | Older still, optionally merged into **days** (60 days, 180 days or 1 year) | The same, per local calendar day | No |
 
@@ -84,7 +84,8 @@ Minute-by-minute history with every remote address is large: busy peer-to-peer a
 - **Merged history in the Hosts card** appears as one *Merged history* line, so the table still adds up.
 - **Periods start on a bucket.** A period that begins in the middle of a merged hour or day leaves that hour or day out, as the chart already leaves out partial minutes.
 - **Merging cannot be undone,** and nothing is deleted except the per-address rows it replaces. CSV exports carry a `bucket_seconds` column (60, 3600 or 86400) saying how wide each row's time bucket is.
-- **When it runs.** A slice of at most a day is merged every couple of seconds until the history is caught up, then the app checks every ten minutes. **Compact now** does it all at once and shrinks the file. The file is also shrunk at launch when a third or more of it is unused.
+- **One month at a time.** Nothing is merged day by day. A calendar month is merged, in one pass, once the *whole* month is older than the setting. With 30 days, October is merged on 1 December, November on 31 December, and so on, so detail is kept for at least 30 days and up to a month longer, and between those dates the app does not touch the history. The daily layer works the same way on hourly totals. Settings → Storage shows what is already merged and when the next month goes.
+- **How it runs.** A merge goes through the month a slice at a time (at most a day of minutes per slice, a couple of seconds apart) so capturing is never held up. **Compact now** ignores the month boundaries and merges everything older than the setting right away, then shrinks the file. The file is also shrunk at launch when a third or more of it is unused.
 
 ## Storage reliability
 

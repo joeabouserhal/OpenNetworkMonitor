@@ -136,6 +136,29 @@ fn path_text(ui: &mut egui::Ui, path: &str) {
     response.on_hover_text(path);
 }
 
+/// A line saying what is merged already and when the next month will be, for the Storage rows.
+fn merge_note(next: Option<crate::model::MergeDue>, what: &str) -> String {
+    let Some(next) = next else {
+        return String::new();
+    };
+    let local = |seconds: i64| {
+        chrono::DateTime::from_timestamp(seconds, 0).map(|time| time.with_timezone(&chrono::Local))
+    };
+    match (
+        local(next.merged_before),
+        local(next.month),
+        local(next.due),
+    ) {
+        (Some(before), Some(month), Some(due)) => format!(
+            "\nMerged so far: everything before {}. {} goes {what} on {}.",
+            before.format("%d %b %Y"),
+            month.format("%B %Y"),
+            due.format("%d %b %Y"),
+        ),
+        _ => String::new(),
+    }
+}
+
 impl MonitorApp {
     pub(super) fn settings(&mut self, ui: &mut egui::Ui) {
         // The form is long, so it scrolls under the page header.
@@ -654,6 +677,7 @@ impl MonitorApp {
 
     fn storage_section(&mut self, ui: &mut egui::Ui) {
         let t = tk(ui.ctx());
+        let now = chrono::Utc::now().timestamp();
         let usage = self.storage_usage();
         let data_dir = self.data_dir.clone();
         let program = std::env::current_exe().ok();
@@ -687,7 +711,13 @@ impl MonitorApp {
                 row(
                     ui,
                     "Detailed history",
-                    "Minute-by-minute history with every host. After this long it is merged into hourly totals per app and adapter. Each host keeps its lifetime total. Merging cannot be undone.",
+                    &format!(
+                        "Minute-by-minute history with every host is kept at least this long. Each calendar month is then merged once, all at once, into hourly totals per app and adapter, when the whole month is older than this, so detail lasts up to a month longer. Each host keeps its lifetime total. Merging cannot be undone.{}",
+                        merge_note(
+                            self.settings.compaction_plan().next_hourly_merge(now),
+                            "into hourly totals"
+                        )
+                    ),
                     380.0,
                     |ui| {
                         let mut days = self.settings.detail_days;
@@ -717,7 +747,13 @@ impl MonitorApp {
                 row(
                     ui,
                     "Daily summaries",
-                    "Merge hourly totals into daily ones after this long, which saves more space. It builds on detailed history being merged first.",
+                    &format!(
+                        "Merge hourly totals into daily ones the same way, a month at a time once the whole month is older than this. It saves more space and builds on detailed history being merged first.{}",
+                        merge_note(
+                            self.settings.compaction_plan().next_daily_merge(now),
+                            "into daily totals"
+                        )
+                    ),
                     340.0,
                     |ui| {
                         ui.add_enabled_ui(self.settings.detail_days > 0, |ui| {
@@ -741,7 +777,7 @@ impl MonitorApp {
                 row(
                     ui,
                     "Compact now",
-                    "Merge old history now and shrink the file. It runs in the background, a slice at a time, and a notice says when it is done.",
+                    "Merge everything older than the setting right now, without waiting for a month to end, and shrink the file. It runs in the background, a slice at a time, and a notice says when it is done.",
                     130.0,
                     |ui| {
                         if Button::new("Compact now")

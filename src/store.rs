@@ -374,10 +374,18 @@ impl Store {
         Ok(oldest)
     }
     /// Merges one more slice of old history into coarser totals, as `plan` says, and returns how
-    /// many rows it replaced; zero means nothing is left to merge. A slice is at most a day of
-    /// minutes or a month of hours, so each call is short and the collector keeps up.
+    /// many rows it replaced; zero means nothing is left to merge. The plan only reaches whole
+    /// calendar months, so nothing is merged until one has ended and aged past the setting; the
+    /// months are then merged a slice at a time, at most a day of minutes or a month of hours per
+    /// call, so each call is short and the collector keeps up.
     pub fn compact_step(&mut self, plan: CompactionPlan, now: i64) -> Result<usize> {
-        let (hours, days) = plan.cutoffs(now);
+        self.compact_to(plan.cutoffs(now))
+    }
+    /// The same without waiting for a month to end, for the Compact now button.
+    pub fn compact_step_now(&mut self, plan: CompactionPlan, now: i64) -> Result<usize> {
+        self.compact_to(plan.cutoffs_now(now))
+    }
+    fn compact_to(&mut self, (hours, days): (Option<i64>, Option<i64>)) -> Result<usize> {
         if let Some(cut) = hours {
             let mut oldest: Option<i64> = None;
             for source in ["adapter", "transport"] {
@@ -1413,7 +1421,8 @@ mod tests {
     /// Ten days of traffic starting on a day boundary: every minute of the first two hours of
     /// each day, from two hosts, plus the adapter's own counters.
     fn ten_days(store: &mut Store) -> i64 {
-        let first = 1_700_000_000 / 86_400 * 86_400;
+        // Ten days in the middle of October 2023.
+        let first = 1_697_068_800;
         for day in 0..10 {
             for minute in 0..120 {
                 let at = first + day * 86_400 + minute * 60;
@@ -1436,12 +1445,13 @@ mod tests {
     fn merging_minutes_into_hours_keeps_totals_charts_and_exports() -> Result<()> {
         let mut store = Store::open(Path::new(":memory:"))?;
         let first = ten_days(&mut store);
-        let now = first + 11 * 86_400;
+        let now = first + 60 * 86_400;
         let filter = Filter {
             source: Source::Transport,
             time_range: Some(crate::model::TimeRange {
                 start: first,
-                end: now,
+                // The days of data, so each merged hour is a point of its own on the chart.
+                end: first + 11 * 86_400,
             }),
             ..Default::default()
         };
@@ -1490,10 +1500,23 @@ mod tests {
             now,
         )?;
         assert_eq!(recent.down, 120 * 150);
-        // The export carries merged rows and says how wide each bucket is.
+        // The export carries merged rows and says how wide each bucket is. A minute of fresh traffic
+        // saved after the merge sits beside them.
+        store.write(
+            now - 3600,
+            &[traffic("transport", "a.exe", "1.1.1.1", 9, 1)],
+        )?;
+        let everything = Filter {
+            source: Source::Transport,
+            time_range: Some(crate::model::TimeRange {
+                start: first,
+                end: now,
+            }),
+            ..Default::default()
+        };
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("out.csv");
-        let rows = store.export(&path, &filter, now)?;
+        let rows = store.export(&path, &everything, now)?;
         let text = std::fs::read_to_string(&path)?;
         assert!(text.lines().next().unwrap().ends_with("bucket_seconds"));
         assert!(text.lines().any(|line| line.ends_with(",3600")));
@@ -1513,7 +1536,7 @@ mod tests {
     fn merging_hours_into_days_lines_up_with_local_days() -> Result<()> {
         let mut store = Store::open(Path::new(":memory:"))?;
         let first = ten_days(&mut store);
-        let now = first + 11 * 86_400;
+        let now = first + 60 * 86_400;
         let plan = CompactionPlan {
             detail_days: Some(2),
             daily_days: Some(5),
@@ -1564,7 +1587,7 @@ mod tests {
     fn lifetime_host_totals_outlive_the_detail_they_came_from() -> Result<()> {
         let mut store = Store::open(Path::new(":memory:"))?;
         let first = ten_days(&mut store);
-        let now = first + 11 * 86_400;
+        let now = first + 60 * 86_400;
         let plan = CompactionPlan {
             detail_days: Some(1),
             daily_days: None,
@@ -1811,6 +1834,115 @@ mod tests {
         Ok(())
     }
 
+    /// A local date and time as a Unix time, so the month boundaries are the ones the user sees.
+    fn local(year: i32, month: u32, day: u32, hour: u32) -> i64 {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .with_ymd_and_hms(year, month, day, hour, 0, 0)
+            .earliest()
+            .expect("a real local time")
+            .timestamp()
+    }
+
+    #[test]
+    fn a_month_is_merged_once_and_nothing_is_merged_in_between() {
+        let plan = CompactionPlan {
+            detail_days: Some(30),
+            daily_days: None,
+        };
+        let november = local(2026, 11, 1, 0);
+        let december = local(2026, 12, 1, 0);
+        // Through December until the 30th, November is not yet 30 days old, so the line sits at
+        // the start of November: October and earlier are merged, November is kept whole.
+        for day in 1..=30 {
+            assert_eq!(
+                plan.cutoffs(local(2026, 12, day, 12)).0,
+                Some(november),
+                "the cutoff does not creep forward on 1 December + {day}"
+            );
+        }
+        // On the 31st November is entirely older than 30 days: it is merged, in one go.
+        assert_eq!(plan.cutoffs(local(2026, 12, 31, 12)).0, Some(december));
+        // And it stays there for the whole of the next month.
+        assert_eq!(plan.cutoffs(local(2027, 1, 20, 9)).0, Some(december));
+    }
+
+    #[test]
+    fn the_settings_say_what_is_merged_and_when_the_next_month_goes() {
+        let plan = CompactionPlan {
+            detail_days: Some(30),
+            daily_days: Some(180),
+        };
+        let now = local(2026, 12, 15, 10);
+        let hourly = plan.next_hourly_merge(now).unwrap();
+        assert_eq!(hourly.merged_before, local(2026, 11, 1, 0));
+        assert_eq!(hourly.month, local(2026, 11, 1, 0), "November is next");
+        // November is all older than 30 days from 1 December + 30 days.
+        let due = hourly.due - local(2026, 12, 31, 0);
+        assert!(
+            due.abs() <= 3600,
+            "due on 31 December, give or take a daylight-saving hour"
+        );
+        let daily = plan.next_daily_merge(now).unwrap();
+        assert!(
+            daily.merged_before < hourly.merged_before,
+            "days reach further back"
+        );
+        assert_eq!(CompactionPlan::default().next_hourly_merge(now), None);
+        let hours_only = CompactionPlan {
+            detail_days: Some(30),
+            daily_days: None,
+        };
+        assert_eq!(hours_only.next_daily_merge(now), None);
+        // Compact now ignores the month boundaries.
+        assert_eq!(
+            plan.cutoffs_now(now).0,
+            Some((now - 30 * 86_400) / 3600 * 3600)
+        );
+    }
+
+    #[test]
+    fn the_history_is_untouched_until_a_whole_month_has_aged_and_then_merged_in_one_pass()
+    -> Result<()> {
+        let mut store = Store::open(Path::new(":memory:"))?;
+        let first = ten_days(&mut store); // the middle of October 2023
+        let plan = CompactionPlan {
+            detail_days: Some(30),
+            daily_days: None,
+        };
+        // Mid-November, October is not yet 30 days old, so nothing is merged.
+        let mid_november = local(2023, 11, 20, 12);
+        assert_eq!(store.compact_step(plan, mid_november)?, 0);
+        // On 30 November the whole of October is more than 30 days old: it goes in one pass.
+        let end_of_november = local(2023, 12, 1, 12);
+        let mut passes = 0;
+        while store.compact_step(plan, end_of_november)? > 0 {
+            passes += 1;
+        }
+        assert!(passes > 0, "October was merged");
+        let detail: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM traffic", [], |r| r.get(0))?;
+        assert_eq!(detail, 0, "no minute row is left from October");
+        // A day later, nothing more to do: it does not compact a little every day.
+        assert_eq!(store.compact_step(plan, end_of_november + 86_400)?, 0);
+        // Compact now merges by the setting alone: back in mid-November nothing is old enough,
+        // but with 7 days it merges what the month rule would still keep.
+        let mut other = Store::open(Path::new(":memory:"))?;
+        ten_days(&mut other);
+        let week = CompactionPlan {
+            detail_days: Some(7),
+            daily_days: None,
+        };
+        assert_eq!(
+            other.compact_step(week, first + 20 * 86_400)?,
+            0,
+            "October is still running"
+        );
+        assert!(other.compact_step_now(week, first + 20 * 86_400)? > 0);
+        Ok(())
+    }
+
     #[test]
     fn the_daily_layer_needs_the_hourly_layer_and_starts_after_it() {
         let now = 1_800_000_000;
@@ -1819,10 +1951,13 @@ mod tests {
             daily_days: Some(10),
         };
         let (hours, days) = plan.cutoffs(now);
-        assert_eq!(hours, Some((now - 30 * 86_400) / 3600 * 3600));
+        assert_eq!(
+            hours,
+            Some(crate::model::local_month_start(now - 30 * 86_400))
+        );
         assert!(
-            days.unwrap() < hours.unwrap(),
-            "days reach further back than hours"
+            days.unwrap() <= hours.unwrap(),
+            "days reach no less far back than hours"
         );
         let alone = CompactionPlan {
             detail_days: None,
@@ -2134,7 +2269,7 @@ mod tests {
         let mut store = Store::open(&dir.path().join("usage.db"))?;
         let first = ten_days(&mut store);
         let big = store.file_bytes()?;
-        let now = first + 11 * 86_400;
+        let now = first + 60 * 86_400;
         let plan = CompactionPlan {
             detail_days: Some(1),
             daily_days: None,

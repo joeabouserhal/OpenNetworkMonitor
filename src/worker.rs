@@ -1245,7 +1245,14 @@ fn run(
                     })
             {
                 last_compaction = Instant::now();
-                match store.compact_step(compaction, now) {
+                // Compact now merges everything older than the setting; otherwise whole months are
+                // merged as each one ends.
+                let step = if compact_job.is_some() {
+                    store.compact_step_now(compaction, now)
+                } else {
+                    store.compact_step(compaction, now)
+                };
+                match step {
                     Ok(0) => {
                         compaction_busy = false;
                         if let Some((before, merged)) = compact_job.take() {

@@ -242,19 +242,61 @@ pub struct CompactionPlan {
     /// Hourly totals older than this become daily totals. Only applies with `detail_days`.
     pub daily_days: Option<u32>,
 }
+/// A merge that is coming: the calendar month it covers and the day it happens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MergeDue {
+    /// Everything before this start of a local month is already merged.
+    pub merged_before: i64,
+    /// The start of the next month to be merged, which is the month `merged_before` begins.
+    pub month: i64,
+    /// When that month is entirely older than the setting, so it is merged.
+    pub due: i64,
+}
 impl CompactionPlan {
-    /// The times before which rows are merged into hours and into days, for `now`.
+    /// The times before which rows are merged into hours and into days, for `now`. They are
+    /// always the start of a local calendar month: a month is merged once, in one go, when the
+    /// whole of it is older than the setting. Detail is therefore kept for at least that long and
+    /// up to a month more, and nothing is merged in between.
     pub fn cutoffs(&self, now: i64) -> (Option<i64>, Option<i64>) {
-        let hours = self.detail_days.map(|days| {
-            let cut = now - i64::from(days) * 86_400;
-            cut / 3600 * 3600
-        });
+        let hours = self
+            .detail_days
+            .map(|days| local_month_start(now - i64::from(days) * 86_400));
         // Days only make sense beyond the hourly layer.
+        let days = self.detail_days.and(self.daily_days).map(|days| {
+            let days = days.max(self.detail_days.unwrap_or(0) + 1);
+            local_month_start(now - i64::from(days) * 86_400)
+        });
+        (hours, days)
+    }
+    /// The same layers without waiting for a month to end: everything older than the setting.
+    /// Used when the user asks to compact now.
+    pub fn cutoffs_now(&self, now: i64) -> (Option<i64>, Option<i64>) {
+        let hours = self
+            .detail_days
+            .map(|days| (now - i64::from(days) * 86_400) / 3600 * 3600);
         let days = self.detail_days.and(self.daily_days).map(|days| {
             let days = days.max(self.detail_days.unwrap_or(0) + 1);
             local_day_start(now - i64::from(days) * 86_400)
         });
         (hours, days)
+    }
+    fn due(days: u32, now: i64) -> MergeDue {
+        let merged_before = local_month_start(now - i64::from(days) * 86_400);
+        MergeDue {
+            merged_before,
+            month: merged_before,
+            due: next_local_month_start(merged_before) + i64::from(days) * 86_400,
+        }
+    }
+    /// The next merge of minutes into hours, if that layer is on.
+    pub fn next_hourly_merge(&self, now: i64) -> Option<MergeDue> {
+        self.detail_days.map(|days| Self::due(days, now))
+    }
+    /// The next merge of hours into days, if that layer is on.
+    pub fn next_daily_merge(&self, now: i64) -> Option<MergeDue> {
+        self.detail_days
+            .and(self.daily_days)
+            .map(|days| Self::due(days.max(self.detail_days.unwrap_or(0) + 1), now))
     }
 }
 /// The start of the local calendar day containing `timestamp`, as a Unix time.
@@ -266,6 +308,22 @@ pub fn local_day_start(timestamp: i64) -> i64 {
         .and_then(|time| time.date_naive().and_hms_opt(0, 0, 0))
         .and_then(|midnight| chrono::Local.from_local_datetime(&midnight).earliest())
         .map_or(timestamp / 86_400 * 86_400, |start| start.timestamp())
+}
+/// The start of the local calendar month containing `timestamp`, as a Unix time.
+pub fn local_month_start(timestamp: i64) -> i64 {
+    use chrono::{Datelike as _, TimeZone as _};
+    chrono::Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .and_then(|time| time.date_naive().with_day(1))
+        .and_then(|first| first.and_hms_opt(0, 0, 0))
+        .and_then(|midnight| chrono::Local.from_local_datetime(&midnight).earliest())
+        .map_or(timestamp / 86_400 * 86_400, |start| start.timestamp())
+}
+/// The start of the local month after the one containing `timestamp`.
+pub fn next_local_month_start(timestamp: i64) -> i64 {
+    // A month is never shorter than 28 days or longer than 31, so 32 days on is inside the next.
+    local_month_start(local_month_start(timestamp) + 32 * 86_400)
 }
 /// What one remote address has used since monitoring began. Kept in a small table of its own,
 /// so it outlives the detailed history it came from.
