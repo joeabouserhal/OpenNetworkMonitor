@@ -354,6 +354,17 @@ impl MonitorApp {
             settings.geo.clone(),
             cc.egui_ctx.clone(),
         )?;
+        // Windows ends the session by terminating the app, so the normal exit never runs. Ask the
+        // worker to save what is waiting as soon as the notice arrives, and wait briefly for it.
+        crate::tray::on_session_end({
+            let commands = worker.tx.clone();
+            move || {
+                let (done, saved) = std::sync::mpsc::channel();
+                if commands.send(Command::SaveNow(done)).is_ok() {
+                    let _ = saved.recv_timeout(std::time::Duration::from_secs(3));
+                }
+            }
+        });
         let (tray, view_warning) = match Tray::new(cc.egui_ctx.clone()) {
             Ok(t) => (Some(t), String::new()),
             Err(e) => (

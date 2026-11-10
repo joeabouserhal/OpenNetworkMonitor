@@ -9,11 +9,14 @@ use std::{
 };
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     Graphics::Gdi::CreateBitmap,
-    UI::WindowsAndMessaging::{
-        CreateIconIndirect, ICON_SMALL, ICONINFO, IsWindow, PostMessageW, SendMessageW, WM_GETICON,
-        WM_MOUSEMOVE, WM_SETICON,
+    UI::{
+        Shell::{DefSubclassProc, SetWindowSubclass},
+        WindowsAndMessaging::{
+            CreateIconIndirect, ICON_SMALL, ICONINFO, IsWindow, PostMessageW, SendMessageW,
+            WM_ENDSESSION, WM_GETICON, WM_MOUSEMOVE, WM_QUERYENDSESSION, WM_SETICON,
+        },
     },
 };
 
@@ -222,7 +225,47 @@ pub fn remember_window(window: &impl HasWindowHandle) {
         && let RawWindowHandle::Win32(win32) = handle.as_raw()
     {
         MAIN_WINDOW.store(win32.hwnd.get(), Ordering::Release);
+        watch_session_end(win32.hwnd.get() as HWND);
     }
+}
+
+/// What to do when Windows is shutting down or signing the user out.
+static SESSION_END: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+/// Sets what runs when the session ends: it must save everything that is waiting, quickly.
+pub fn on_session_end(save: impl Fn() + Send + Sync + 'static) {
+    let _ = SESSION_END.set(Box::new(save));
+}
+const SESSION_HOOK: usize = 0x4f4e4d;
+
+/// Windows ends the session by telling each window, then terminating the process; the app's
+/// normal exit never runs. This hears the notice first, so what is waiting is saved in time.
+fn watch_session_end(window: HWND) {
+    // SAFETY: subclasses a window of this process on its own thread; the procedure below only
+    // forwards to the next one and runs the saved callback.
+    unsafe {
+        SetWindowSubclass(window, Some(session_procedure), SESSION_HOOK, 0);
+    }
+}
+
+/// # Safety
+/// Called only by Windows, through the window's subclass chain.
+unsafe extern "system" fn session_procedure(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    // The query comes first and may be refused by another program; the end notice carries a
+    // flag saying whether the session really is ending. Saving on both is harmless, since the
+    // second finds little left to save.
+    let ending = message == WM_QUERYENDSESSION || (message == WM_ENDSESSION && wparam != 0);
+    if ending && let Some(save) = SESSION_END.get() {
+        save();
+    }
+    // SAFETY: passes Windows' own arguments to the rest of the chain, which allows the shutdown.
+    unsafe { DefSubclassProc(window, message, wparam, lparam) }
 }
 
 pub fn request_exit(ctx: &egui::Context, exit: &AtomicBool) {
@@ -305,6 +348,52 @@ mod tests {
         assert!(commands.contains(&egui::ViewportCommand::Visible(true)));
         assert!(!commands.contains(&egui::ViewportCommand::Close));
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn ending_the_windows_session_saves_first_and_lets_it_end() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW,
+        };
+        static SAVES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        on_session_end(|| {
+            SAVES.fetch_add(1, Ordering::SeqCst);
+        });
+        let class: Vec<u16> = "STATIC".encode_utf16().chain(Some(0)).collect();
+        // SAFETY: a built-in window class and null parent/menu/instance create a plain top-level
+        // window that is never shown; it is destroyed below.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!hwnd.is_null());
+        watch_session_end(hwnd);
+        // SAFETY: sends the messages Windows sends, to this thread's own window.
+        unsafe {
+            // Asked whether the session may end: it saves, and does not object.
+            let answer = SendMessageW(hwnd, WM_QUERYENDSESSION, 0, 0);
+            assert_eq!(answer, 1, "the shutdown is not held up");
+            assert_eq!(SAVES.load(Ordering::SeqCst), 1);
+            // Told the session is ending: it saves again.
+            SendMessageW(hwnd, WM_ENDSESSION, 1, 0);
+            assert_eq!(SAVES.load(Ordering::SeqCst), 2);
+            // Told it was cancelled: nothing to do.
+            SendMessageW(hwnd, WM_ENDSESSION, 0, 0);
+            assert_eq!(SAVES.load(Ordering::SeqCst), 2);
+            DestroyWindow(hwnd);
+        }
     }
 
     #[test]

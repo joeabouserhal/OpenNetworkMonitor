@@ -64,6 +64,8 @@ pub enum Command {
     Compaction(CompactionPlan),
     /// Merge everything the plan allows right now and give the freed space back to the system.
     CompactNow,
+    /// Save what is staged now and answer when it is on the disk: Windows is shutting down.
+    SaveNow(Sender<()>),
     /// Whether the window is on screen. Hidden in the tray, nothing is drawn, so history is not
     /// read at all and saves are further apart.
     WindowShown(bool),
@@ -813,6 +815,13 @@ fn run(
                 Command::ResolveHosts(addresses) => hosts.request(&addresses),
                 Command::Labels(found) => labels.extend(found),
                 Command::Pause(paused) => recording_paused = paused,
+                Command::SaveNow(done) => {
+                    if store.save().is_ok() {
+                        last_save = Instant::now();
+                    }
+                    let _ = store.checkpoint();
+                    let _ = done.send(());
+                }
                 Command::Compaction(plan) => {
                     if plan != compaction {
                         compaction = plan;
