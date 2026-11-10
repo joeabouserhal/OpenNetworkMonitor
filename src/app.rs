@@ -119,7 +119,8 @@ impl Settings {
     }
     /// What old history is merged into, as the worker needs it.
     fn compaction_plan(&self) -> CompactionPlan {
-        let days = |days: u32| (days > 0).then_some(days);
+        // A hand-edited settings file could hold anything; a century is more than any history.
+        let days = |days: u32| (days > 0).then_some(days.min(36_500));
         CompactionPlan {
             detail_days: days(self.detail_days),
             daily_days: days(self.daily_days),

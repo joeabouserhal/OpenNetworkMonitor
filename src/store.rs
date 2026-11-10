@@ -1733,6 +1733,72 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_never_sees_traffic_twice_or_missing_while_the_writer_stages_and_saves() -> Result<()>
+    {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let dir = tempfile::tempdir()?;
+        let mut store = Store::open(&dir.path().join("usage.db"))?;
+        let reader = store.open_reader()?.expect("a file database can be shared");
+        let first = 1_700_000_000 / 60 * 60;
+        // Bytes whose staging has begun, and bytes whose staging has finished. A read made in
+        // between must land between the two readings taken around it.
+        let begun = AtomicU64::new(0);
+        let finished = AtomicU64::new(0);
+        let done = AtomicBool::new(false);
+        let filter = window(first, Source::Transport);
+        let (begun, finished, done, shared) = (&begun, &finished, &done, &filter);
+        std::thread::scope(|scope| -> Result<()> {
+            let watcher = scope.spawn(move || -> Result<u64> {
+                let mut reads = 0;
+                while !done.load(Ordering::SeqCst) {
+                    let low = finished.load(Ordering::SeqCst);
+                    let seen = reader.history(shared, first + 600)?.down;
+                    let high = begun.load(Ordering::SeqCst);
+                    assert!(
+                        low <= seen && seen <= high,
+                        "a read saw {seen} bytes with {low} surely staged and {high} at most"
+                    );
+                    reads += 1;
+                }
+                Ok(reads)
+            });
+            for tick in 0..300 {
+                begun.fetch_add(3, Ordering::SeqCst);
+                store.stage(
+                    &std::collections::BTreeMap::from([(
+                        first + tick % 3 * 60,
+                        vec![
+                            traffic("transport", "a.exe", "1.1.1.1", 1, 0),
+                            traffic("transport", "a.exe", "8.8.8.8", 1, 0),
+                            traffic("transport", "b.exe", "1.1.1.1", 1, 0),
+                        ],
+                    )]),
+                    &[],
+                );
+                finished.fetch_add(3, Ordering::SeqCst);
+                if tick % 7 == 6 {
+                    store.save()?;
+                }
+            }
+            done.store(true, Ordering::SeqCst);
+            let reads = watcher.join().expect("the watcher did not panic")?;
+            assert!(
+                reads > 5,
+                "the reader really did run alongside ({reads} reads)"
+            );
+            Ok(())
+        })?;
+        store.save()?;
+        let after = store.open_reader()?.expect("a file database can be shared");
+        assert_eq!(
+            after.history(&filter, first + 600)?.down,
+            900,
+            "all of it, once"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_failed_save_loses_nothing_and_is_not_counted_twice_when_it_succeeds() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let mut store = Store::open(&dir.path().join("usage.db"))?;

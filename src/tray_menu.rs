@@ -22,11 +22,11 @@ use windows_sys::Win32::{
     UI::{
         HiDpi::GetDpiForWindow,
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, HWND_TOPMOST, IDC_ARROW,
-            LoadCursorW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_SHOWWINDOW, SetForegroundWindow,
-            SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_DESTROY, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetForegroundWindow,
+            HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW, SW_SHOWNOACTIVATE,
+            SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE,
+            WM_ACTIVATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+            WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
 };
@@ -183,6 +183,7 @@ fn place(click: (i32, i32), size: (i32, i32), screen: RECT) -> (i32, i32) {
 }
 
 struct Menu {
+    opened: std::time::Instant,
     entries: [Entry; 4],
     hover: Option<usize>,
     scale: f32,
@@ -317,6 +318,7 @@ pub fn open(at: (f64, f64), paused: bool) {
             *open.borrow_mut() = Some((
                 window,
                 Menu {
+                    opened: std::time::Instant::now(),
                     entries: entries(paused),
                     hover: None,
                     scale,
@@ -329,7 +331,17 @@ pub fn open(at: (f64, f64), paused: bool) {
         // A click on the tray icon lets this process take the foreground; the menu needs it to
         // notice when the user clicks elsewhere.
         SetForegroundWindow(window);
+        // Windows sometimes refuses to hand the foreground over. The menu would then never see
+        // the click elsewhere that closes it, so it also checks on a timer.
+        SetTimer(window, DISMISS_TIMER, 250, None);
     }
+}
+
+const DISMISS_TIMER: usize = 1;
+/// Whether a menu that has been open for `open_for` should close because it has lost the focus,
+/// whether or not Windows told it so. A short grace lets the focus arrive first.
+fn should_dismiss(is_foreground: bool, open_for: std::time::Duration) -> bool {
+    !is_foreground && open_for >= std::time::Duration::from_millis(750)
 }
 
 /// Closes the menu if it is open.
@@ -363,6 +375,19 @@ unsafe extern "system" fn procedure(
 ) -> LRESULT {
     match message {
         WM_ERASEBKGND => 1,
+        WM_TIMER if wparam == DISMISS_TIMER => {
+            let open_for = OPEN.with(|open| {
+                open.borrow()
+                    .as_ref()
+                    .map(|(_, menu)| menu.opened.elapsed())
+            });
+            // SAFETY: only asks which window has the focus.
+            let is_foreground = unsafe { GetForegroundWindow() } == window;
+            if open_for.is_some_and(|open_for| should_dismiss(is_foreground, open_for)) {
+                close();
+            }
+            0
+        }
         WM_PAINT => {
             paint(window);
             0
@@ -676,6 +701,20 @@ mod tests {
         assert_eq!(entry_at(top_of(3) + 1), Some(3));
         assert_eq!(entry_at(height()), None);
         assert_eq!(top_of(3) + ROW + PADDING, height());
+    }
+
+    #[test]
+    fn a_menu_that_never_got_the_focus_still_closes() {
+        let ms = std::time::Duration::from_millis;
+        assert!(!should_dismiss(true, ms(5_000)), "it has the focus: stay");
+        assert!(
+            !should_dismiss(false, ms(100)),
+            "give the focus a moment to arrive"
+        );
+        assert!(
+            should_dismiss(false, ms(800)),
+            "no focus after the grace: close"
+        );
     }
 
     #[test]

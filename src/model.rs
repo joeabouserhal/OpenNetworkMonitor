@@ -197,17 +197,17 @@ fn month_start<T: TimeZone>(now: chrono::DateTime<T>) -> i64 {
         .unwrap()
         .and_hms_opt(0, 0, 0)
         .unwrap();
-    // Some time zones skip or repeat midnight. Choose the first valid instant
-    // of the month, resolving repeated local times to their earlier occurrence.
-    (0..=2880)
-        .find_map(|minute| {
-            let local = midnight.checked_add_signed(chrono::Duration::minutes(minute))?;
-            now.timezone()
-                .from_local_datetime(&local)
-                .earliest()
-                .map(|time| time.timestamp())
-        })
-        .unwrap_or_else(|| now.timestamp())
+    first_valid_instant(&now.timezone(), midnight).unwrap_or_else(|| now.timestamp())
+}
+/// The first real instant at or after a local date and time. Some time zones skip midnight when
+/// the clocks change, or repeat it; a repeated time resolves to its earlier occurrence.
+fn first_valid_instant<T: TimeZone>(zone: &T, local: chrono::NaiveDateTime) -> Option<i64> {
+    (0..=2880).find_map(|minute| {
+        let local = local.checked_add_signed(chrono::Duration::minutes(minute))?;
+        zone.from_local_datetime(&local)
+            .earliest()
+            .map(|time| time.timestamp())
+    })
 }
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Point {
@@ -262,11 +262,17 @@ impl CompactionPlan {
             .detail_days
             .map(|days| local_month_start(now - i64::from(days) * 86_400));
         // Days only make sense beyond the hourly layer.
-        let days = self.detail_days.and(self.daily_days).map(|days| {
-            let days = days.max(self.detail_days.unwrap_or(0) + 1);
-            local_month_start(now - i64::from(days) * 86_400)
-        });
+        let days = self
+            .daily_after()
+            .map(|days| local_month_start(now - i64::from(days) * 86_400));
         (hours, days)
+    }
+    /// After how many days hourly totals become daily ones: the setting, but always after the
+    /// hourly layer, and none without it.
+    fn daily_after(&self) -> Option<u32> {
+        let detail = self.detail_days?;
+        self.daily_days
+            .map(|days| days.max(detail.saturating_add(1)))
     }
     /// The same layers without waiting for a month to end: everything older than the setting.
     /// Used when the user asks to compact now.
@@ -274,10 +280,9 @@ impl CompactionPlan {
         let hours = self
             .detail_days
             .map(|days| (now - i64::from(days) * 86_400) / 3600 * 3600);
-        let days = self.detail_days.and(self.daily_days).map(|days| {
-            let days = days.max(self.detail_days.unwrap_or(0) + 1);
-            local_day_start(now - i64::from(days) * 86_400)
-        });
+        let days = self
+            .daily_after()
+            .map(|days| local_day_start(now - i64::from(days) * 86_400));
         (hours, days)
     }
     fn due(days: u32, now: i64) -> MergeDue {
@@ -294,31 +299,24 @@ impl CompactionPlan {
     }
     /// The next merge of hours into days, if that layer is on.
     pub fn next_daily_merge(&self, now: i64) -> Option<MergeDue> {
-        self.detail_days
-            .and(self.daily_days)
-            .map(|days| Self::due(days.max(self.detail_days.unwrap_or(0) + 1), now))
+        self.daily_after().map(|days| Self::due(days, now))
     }
 }
 /// The start of the local calendar day containing `timestamp`, as a Unix time.
 pub fn local_day_start(timestamp: i64) -> i64 {
-    use chrono::TimeZone as _;
     chrono::Local
         .timestamp_opt(timestamp, 0)
         .single()
         .and_then(|time| time.date_naive().and_hms_opt(0, 0, 0))
-        .and_then(|midnight| chrono::Local.from_local_datetime(&midnight).earliest())
-        .map_or(timestamp / 86_400 * 86_400, |start| start.timestamp())
+        .and_then(|midnight| first_valid_instant(&chrono::Local, midnight))
+        .unwrap_or(timestamp / 86_400 * 86_400)
 }
 /// The start of the local calendar month containing `timestamp`, as a Unix time.
 pub fn local_month_start(timestamp: i64) -> i64 {
-    use chrono::{Datelike as _, TimeZone as _};
     chrono::Local
         .timestamp_opt(timestamp, 0)
         .single()
-        .and_then(|time| time.date_naive().with_day(1))
-        .and_then(|first| first.and_hms_opt(0, 0, 0))
-        .and_then(|midnight| chrono::Local.from_local_datetime(&midnight).earliest())
-        .map_or(timestamp / 86_400 * 86_400, |start| start.timestamp())
+        .map_or(timestamp / 86_400 * 86_400, month_start)
 }
 /// The start of the local month after the one containing `timestamp`.
 pub fn next_local_month_start(timestamp: i64) -> i64 {

@@ -10,7 +10,7 @@ use std::{
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-    Graphics::Gdi::CreateBitmap,
+    Graphics::Gdi::{CreateBitmap, DeleteObject, HGDIOBJ},
     UI::{
         Shell::{DefSubclassProc, SetWindowSubclass},
         WindowsAndMessaging::{
@@ -199,7 +199,11 @@ pub fn set_caption_icon(dark_title_bar: bool) {
                 hbmMask: mask,
                 hbmColor: color,
             };
-            CreateIconIndirect(&info)
+            let icon = CreateIconIndirect(&info);
+            // The icon keeps its own copies of the bitmaps.
+            DeleteObject(color as HGDIOBJ);
+            DeleteObject(mask as HGDIOBJ);
+            icon
         };
         icons[slot] = icon as isize;
     }

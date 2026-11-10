@@ -671,3 +671,48 @@ fn the_saved_preferences_hold_settings_and_the_window_but_not_egui_memory() {
             .is_some_and(|s| s.contains("tray_icon"))
     );
 }
+
+#[test]
+fn nonsense_in_a_hand_edited_settings_file_cannot_break_compaction() {
+    let ctx = egui::Context::default();
+    let mut app = MonitorApp::preview(&ctx, "settings", false);
+    app.settings.detail_days = u32::MAX;
+    app.settings.daily_days = u32::MAX;
+    let plan = app.settings.compaction_plan();
+    assert_eq!(plan.detail_days, Some(36_500), "a century at most");
+    let now = 1_800_000_000;
+    // None of this may overflow or panic, whatever the values.
+    for plan in [
+        plan,
+        CompactionPlan {
+            detail_days: Some(u32::MAX),
+            daily_days: Some(u32::MAX),
+        },
+        CompactionPlan {
+            detail_days: Some(u32::MAX),
+            daily_days: None,
+        },
+    ] {
+        let _ = plan.cutoffs(now);
+        let _ = plan.cutoffs_now(now);
+        let _ = plan.next_hourly_merge(now);
+        let _ = plan.next_daily_merge(now);
+    }
+}
+
+#[test]
+fn month_and_day_starts_are_stable_and_never_after_the_time_they_start() {
+    use crate::model::{local_day_start, local_month_start, next_local_month_start};
+    for at in [0, 86_399, 1_700_000_000, 1_793_000_000, 4_000_000_000] {
+        let day = local_day_start(at);
+        let month = local_month_start(at);
+        assert!(
+            day <= at && month <= day,
+            "{at}: a month starts before its days"
+        );
+        assert_eq!(local_day_start(day), day);
+        assert_eq!(local_month_start(month), month);
+        let next = next_local_month_start(at);
+        assert!(next > at && next - month <= 32 * 86_400 && next - month >= 27 * 86_400);
+    }
+}
