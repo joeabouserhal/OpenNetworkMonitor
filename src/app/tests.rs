@@ -557,3 +557,31 @@ fn the_tray_icon_colour_follows_the_chosen_style_and_the_taskbar() {
         "each taskbar gets the shade that shows on it"
     );
 }
+
+#[test]
+fn storage_usage_adds_up_the_data_folder_by_what_each_file_holds() {
+    use super::logic::StorageUsage;
+    let dir = tempfile::tempdir().unwrap();
+    let write =
+        |name: &str, bytes: usize| std::fs::write(dir.path().join(name), vec![0u8; bytes]).unwrap();
+    write("usage.db", 100);
+    write("usage.db-wal", 50);
+    write("preferences.ron", 10);
+    write("running-build.txt", 5);
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("nested").join("old.bin"), [0u8; 7]).unwrap();
+    let usage = StorageUsage::measure(dir.path());
+    assert_eq!(
+        usage,
+        StorageUsage {
+            history: 150,
+            settings: 10,
+            other: 12
+        }
+    );
+    assert_eq!(usage.total(), 172);
+    assert_eq!(
+        StorageUsage::measure(&dir.path().join("missing")),
+        StorageUsage::default()
+    );
+}

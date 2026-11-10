@@ -1,7 +1,64 @@
 //! Questions the pages ask about the current data and filters.
 use super::*;
 
+/// How much disk space the app's data folder takes, in bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct StorageUsage {
+    /// The usage database and its write-ahead log.
+    pub history: u64,
+    pub settings: u64,
+    pub other: u64,
+}
+impl StorageUsage {
+    pub(super) fn total(&self) -> u64 {
+        self.history
+            .saturating_add(self.settings)
+            .saturating_add(self.other)
+    }
+    /// Adds up every file under `dir`, sorting them by what they hold. A missing folder is empty.
+    pub(super) fn measure(dir: &std::path::Path) -> Self {
+        let mut usage = Self::default();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(folder) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    pending.push(entry.path());
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                let bucket = if name.starts_with("usage.db") {
+                    &mut usage.history
+                } else if name.starts_with("preferences.") {
+                    &mut usage.settings
+                } else {
+                    &mut usage.other
+                };
+                *bucket = bucket.saturating_add(meta.len());
+            }
+        }
+        usage
+    }
+}
+
 impl MonitorApp {
+    /// The data folder's size, measured again when it is a few seconds old.
+    pub(super) fn storage_usage(&mut self) -> StorageUsage {
+        const FRESH: std::time::Duration = std::time::Duration::from_secs(5);
+        match self.storage {
+            Some((read_at, usage)) if read_at.elapsed() < FRESH => usage,
+            _ => {
+                let usage = StorageUsage::measure(&self.data_dir);
+                self.storage = Some((std::time::Instant::now(), usage));
+                usage
+            }
+        }
+    }
     /// Highest download and upload speeds among the chart's observed samples, or None when
     /// the period has none. A frozen chart reports the frozen samples.
     pub(super) fn peak_rates(&self) -> (Option<f64>, Option<f64>) {

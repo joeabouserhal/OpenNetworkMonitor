@@ -163,6 +163,16 @@ pub(super) fn reveal_in_explorer(path: &str) -> bool {
         .is_ok()
 }
 
+/// Opens a folder in Explorer. Only an existing absolute folder is passed on.
+pub(super) fn open_folder(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && path.is_dir()
+        && std::process::Command::new("explorer.exe")
+            .arg(path)
+            .spawn()
+            .is_ok()
+}
+
 /// Ends a process on request. The system's own processes and this app are refused.
 pub(super) fn end_process(pid: u32) -> Result<(), String> {
     use windows_sys::Win32::{
@@ -279,6 +289,8 @@ mod tests {
         }
         assert!(!reveal_in_explorer("relative.exe"));
         assert!(!reveal_in_explorer("C:/definitely/not/here.exe"));
+        assert!(!open_folder(std::path::Path::new("relative")));
+        assert!(!open_folder(std::path::Path::new("C:/definitely/not/here")));
     }
 
     #[test]

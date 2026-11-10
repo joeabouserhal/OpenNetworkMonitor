@@ -48,6 +48,14 @@ impl MonitorApp {
             selected_app: None,
             connection_search: String::new(),
             app_search: String::new(),
+            storage: Some((
+                std::time::Instant::now(),
+                super::logic::StorageUsage {
+                    history: 134_300_000,
+                    settings: 100_000,
+                    other: 0,
+                },
+            )),
             data_dir: PathBuf::from(r"C:\Users\Example\AppData\Local\OpenNetworkMonitor"),
             view_warning: String::new(),
             custom_period: None,

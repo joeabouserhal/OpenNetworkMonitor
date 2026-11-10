@@ -255,6 +255,8 @@ pub struct MonitorApp {
     connection_search: String,
     app_search: String,
     data_dir: PathBuf,
+    /// How much space the data folder takes, and when that was measured.
+    storage: Option<(std::time::Instant, logic::StorageUsage)>,
     view_warning: String,
     custom_period: Option<CustomPeriod>,
     app_cache: Arc<Vec<AppTotal>>,
@@ -371,6 +373,7 @@ impl MonitorApp {
             connection_search: String::new(),
             app_search: String::new(),
             data_dir,
+            storage: None,
             view_warning,
             custom_period: None,
             app_cache: Arc::new(Vec::new()),

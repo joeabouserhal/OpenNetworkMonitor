@@ -149,6 +149,7 @@ impl MonitorApp {
                 self.monitoring_section(ui);
                 self.countries_section(ui);
                 self.alerts_section(ui);
+                self.storage_section(ui);
                 self.history_section(ui);
                 self.about_section(ui);
                 ui.add_space(20.0);
@@ -651,6 +652,81 @@ impl MonitorApp {
         );
     }
 
+    fn storage_section(&mut self, ui: &mut egui::Ui) {
+        let t = tk(ui.ctx());
+        let usage = self.storage_usage();
+        let data_dir = self.data_dir.clone();
+        let program = std::env::current_exe().ok();
+        section(
+            ui,
+            "Storage",
+            "Where the app keeps its files and how much space they take.",
+            |ui| {
+                let breakdown = format!(
+                    "History {} \u{b7} Settings {}{}",
+                    format_bytes(usage.history as f64),
+                    format_bytes(usage.settings as f64),
+                    if usage.other > 0 {
+                        format!(" \u{b7} Other {}", format_bytes(usage.other as f64))
+                    } else {
+                        String::new()
+                    }
+                );
+                row(ui, "Disk space used", &breakdown, 110.0, |ui| {
+                    let (rect, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+                    text::paint(
+                        ui.painter(),
+                        rect,
+                        Align2::RIGHT_CENTER,
+                        &format_bytes(usage.total() as f64),
+                        text::semibold(16.0),
+                        t.foreground,
+                    );
+                });
+                row(
+                    ui,
+                    "App data folder",
+                    &data_dir.display().to_string(),
+                    120.0,
+                    |ui| {
+                        if Button::new("Open folder")
+                            .icon(Icon::External)
+                            .variant(Variant::Outline)
+                            .size(Size::Sm)
+                            .show(ui)
+                            .clicked()
+                            && !connection_tools::open_folder(&data_dir)
+                        {
+                            self.set_notice("The data folder could not be opened.");
+                        }
+                    },
+                );
+                if let Some(program) = program {
+                    row(
+                        ui,
+                        "Program file",
+                        &program.display().to_string(),
+                        130.0,
+                        |ui| {
+                            if Button::new("Show in folder")
+                                .icon(Icon::External)
+                                .variant(Variant::Outline)
+                                .size(Size::Sm)
+                                .show(ui)
+                                .clicked()
+                            {
+                                connection_tools::reveal_in_explorer(
+                                    &program.display().to_string(),
+                                );
+                            }
+                        },
+                    );
+                }
+            },
+        );
+    }
+
     fn history_section(&mut self, ui: &mut egui::Ui) {
         section(
             ui,
@@ -662,7 +738,6 @@ impl MonitorApp {
                         ui,
                         "CSV follows the current Overview filters. Timestamps use UTC and byte counts are raw.",
                     );
-                    path_text(ui, &self.data_dir.display().to_string());
                     if Button::new("Export selected usage to CSV…")
                         .icon(Icon::Download)
                         .variant(Variant::Outline)
