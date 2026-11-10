@@ -739,9 +739,12 @@ fn the_storage_card_opens_and_closes_and_says_how_much_it_uses_either_way() {
     let open = texts(&settle(&mut app, &ctx, size));
     assert!(open.iter().any(|(t, _)| t == "App data folder"));
     assert!(
-        open.iter()
-            .any(|(t, _)| t.contains("used \u{b7} where the app keeps"))
+        !open
+            .iter()
+            .any(|(t, _)| t.ends_with(" used") && t != "Disk space used"),
+        "the header says nothing about usage while open: the first row does"
     );
+    assert!(open.iter().any(|(t, _)| t == "Disk space used"));
     // The folder holds the history, settings and log, and there is only one button for it.
     assert!(
         open.iter()
@@ -755,4 +758,15 @@ fn the_storage_card_opens_and_closes_and_says_how_much_it_uses_either_way() {
     assert_eq!(open.iter().filter(|(t, _)| t == "Open folder").count(), 1);
     click(&mut app, &ctx, size, "Storage");
     assert!(!app.settings.storage_open);
+}
+
+#[test]
+fn a_saved_window_takes_the_default_size_once_in_the_points_of_the_interface_size() {
+    // At 85% a point is 0.85 pixels, so 1000x660 pixels is about 1176x776 points.
+    let target = default_window_size(Vec2::new(1496.0, 937.0), 0.85).unwrap();
+    assert!((target.x * 0.85 - DEFAULT_WINDOW_SIZE[0]).abs() < 0.01);
+    assert!((target.y * 0.85 - DEFAULT_WINDOW_SIZE[1]).abs() < 0.01);
+    // A window that is too small is brought up to it as well, and one that is right is left alone.
+    assert!(default_window_size(Vec2::new(850.0, 560.0), 0.85).is_some());
+    assert_eq!(default_window_size(target, 0.85), None);
 }

@@ -86,7 +86,7 @@ The footer has responsive 26/34/40 percent sections for totals, destinations and
 
 Store::transport_summary groups transport bytes by adapter, executable path and scope in a single SQL scan. It derives both the destination split and app ranking, merges processes/endpoints/types by path, sorts combined down/up and retains five entries. It uses the same minute-bounded period and effective adapter membership as the existing captured-traffic summary; app-page searches do not restrict Overall Traffic. Shared holds the small top_apps vector, refreshes it with history, and clears it on filter changes. Friendly metadata includes paths from the summary, including saved applications that are no longer running.
 
-The default viewport is 1440x820 points. A persisted wide_summary_initialized preference widens an older saved window once, preserving its height and respecting monitor width. Maximized windows are retained, and subsequent manual window resizing continues to persist normally. Native capture, database schema and source-accounting boundaries remain unchanged.
+The default viewport is 1000x660 pixels (at the default interface size, 1176x776 points). A persisted wide_summary_initialized preference widens an older saved window once, preserving its height and respecting monitor width. Maximized windows are retained, and subsequent manual window resizing continues to persist normally. Native capture, database schema and source-accounting boundaries remain unchanged.
 
 ## v0.3.3 dense app traffic
 

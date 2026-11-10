@@ -78,7 +78,8 @@ struct Settings {
     /// non-administrators can change.
     accept_startup_risk: bool,
     tray_icon: TrayIconStyle,
-    /// Whether the Storage card in Settings is open.
+    /// Whether the Storage card in Settings is open. Never saved, so it starts closed each run.
+    #[serde(skip)]
     storage_open: bool,
     /// After this many days minute-by-minute history is merged into hourly totals; 0 keeps
     /// every minute for ever.
@@ -89,6 +90,8 @@ struct Settings {
     bits: bool,
     ui_scale: f32,
     wide_summary_initialized: bool,
+    /// The window was set to the current default size once, whatever size it had been saved at.
+    default_window_applied: bool,
     /// Follow the Windows light/dark setting instead of `theme`.
     follow_system: bool,
     /// Whether the welcome card has been dismissed. Unknown (none) in settings saved
@@ -181,6 +184,7 @@ impl Default for Settings {
             bits: false,
             ui_scale: DEFAULT_UI_SCALE,
             wide_summary_initialized: false,
+            default_window_applied: false,
             follow_system: false,
             intro_seen: None,
             alert_new_apps: false,
@@ -745,6 +749,18 @@ impl eframe::App for MonitorApp {
                 self.settings.wide_summary_initialized = true;
             }
         }
+        // Once, a saved window takes the new default size; after that it keeps whatever the user sets.
+        if !self.settings.default_window_applied {
+            let viewport = ctx.input(|i| i.viewport().clone());
+            if let Some(rect) = viewport.inner_rect {
+                if viewport.maximized != Some(true)
+                    && let Some(size) = default_window_size(rect.size(), ctx.zoom_factor())
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                }
+                self.settings.default_window_applied = true;
+            }
+        }
         if let Ok(data) = self.worker.shared.lock() {
             if data.revision != self.data.revision
                 || data.history_generation != self.data.history_generation
@@ -908,6 +924,12 @@ fn initial_wide_size(current: Vec2, monitor: Option<Vec2>) -> Vec2 {
     let width = current.x.max(DEFAULT_WINDOW_SIZE[0]);
     let width = monitor.map_or(width, |m| width.min((m.x - 32.0).max(MIN_WINDOW_SIZE[0])));
     Vec2::new(width, current.y)
+}
+/// The default window size in points at the interface size in use, or `None` if the window
+/// already has it. `DEFAULT_WINDOW_SIZE` is in physical pixels, and a point is `zoom` pixels.
+fn default_window_size(current: Vec2, zoom: f32) -> Option<Vec2> {
+    let size = Vec2::new(DEFAULT_WINDOW_SIZE[0], DEFAULT_WINDOW_SIZE[1]) / zoom.max(0.1);
+    ((size - current).abs().max_elem() > 1.0).then_some(size)
 }
 /// New installs open a little smaller than 100% so more of each page is on screen.
 const DEFAULT_UI_SCALE: f32 = 0.85;

@@ -18,7 +18,9 @@ mod settings;
 mod toolbar;
 
 pub const NAV_WIDTH: f32 = 232.0;
-pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1440.0, 788.0];
+/// The size a new install opens at, in physical pixels at the default interface size: a compact
+/// window just above the smallest one, which the user can grow.
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1000.0, 660.0];
 /// The smallest window, in physical pixels at the default interface size. Pages are laid out
 /// for a fixed logical size and up, so nothing is hidden or rearranged in a small window.
 pub const MIN_WINDOW_SIZE: [f32; 2] = [952.0, 636.0];

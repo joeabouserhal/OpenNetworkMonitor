@@ -8,7 +8,13 @@ use crate::ui::{
 use chrono::TimeZone as _;
 
 /// A titled card of settings rows.
-fn section(ui: &mut egui::Ui, title: &str, description: &str, rows: impl FnOnce(&mut egui::Ui)) {
+fn section(
+    ui: &mut egui::Ui,
+    lead: Icon,
+    title: &str,
+    description: &str,
+    rows: impl FnOnce(&mut egui::Ui),
+) {
     card(ui, 0, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         egui::Frame::new()
@@ -20,7 +26,7 @@ fn section(ui: &mut egui::Ui, title: &str, description: &str, rows: impl FnOnce(
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                layout::card_header(ui, title, description, |_| {});
+                layout::card_header_with_icon(ui, Some(lead), title, description, |_| {});
             });
         rows(ui);
     });
@@ -30,6 +36,7 @@ fn section(ui: &mut egui::Ui, title: &str, description: &str, rows: impl FnOnce(
 /// The description stays in view either way, so it can carry a summary.
 fn collapsible_section(
     ui: &mut egui::Ui,
+    lead: Icon,
     id: &str,
     title: &str,
     description: &str,
@@ -49,7 +56,7 @@ fn collapsible_section(
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                layout::card_header(ui, title, description, |ui| {
+                layout::card_header_with_icon(ui, Some(lead), title, description, |ui| {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
                     icon::paint(
                         ui.painter(),
@@ -247,135 +254,144 @@ impl MonitorApp {
 
     fn appearance_section(&mut self, ui: &mut egui::Ui) {
         let t = tk(ui.ctx());
-        section(ui, "Appearance", "How the app looks.", |ui| {
-            row(
-                ui,
-                "Theme",
-                "Follow Windows, or always use light or dark.",
-                260.0,
-                |ui| {
-                    let mut appearance = self.settings.appearance();
-                    if tabs(
-                        ui,
-                        "appearance",
-                        &mut appearance,
-                        &[
-                            (Appearance::Light, "Light"),
-                            (Appearance::Dark, "Dark"),
-                            (Appearance::System, "System"),
-                        ],
-                    ) {
-                        self.settings.appearance = Some(appearance);
-                    }
-                },
-            );
-            row(
-                ui,
-                "Tray icon",
-                "The colour of the icon beside the clock. Monochrome is white on a dark taskbar and gray on a light one.",
-                300.0,
-                |ui| {
-                    let mut style = self.settings.tray_icon;
-                    if tabs(
-                        ui,
-                        "tray-icon",
-                        &mut style,
-                        &[
-                            (TrayIconStyle::Default, "Default"),
-                            (TrayIconStyle::Accent, "Accent"),
-                            (TrayIconStyle::Monochrome, "Monochrome"),
-                        ],
-                    ) {
-                        self.settings.tray_icon = style;
-                    }
-                },
-            );
-            block(ui, |ui| {
-                let (label, _) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
-                text::paint(
-                    ui.painter(),
-                    label,
-                    Align2::LEFT_CENTER,
-                    "Accent colour",
-                    text::medium(14.0),
-                    t.foreground,
-                );
-                note(
+        section(
+            ui,
+            Icon::Palette,
+            "Appearance",
+            "How the app looks.",
+            |ui| {
+                row(
                     ui,
-                    "Used for primary buttons, focus rings and the download series.",
-                );
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                    let scheme = self.settings.scheme(ui.ctx());
-                    for base in BaseColor::ALL {
-                        if swatch(ui, &t, base, scheme, self.settings.base_color == base).clicked()
-                        {
-                            self.settings.base_color = base;
+                    "Theme",
+                    "Follow Windows, or always use light or dark.",
+                    260.0,
+                    |ui| {
+                        let mut appearance = self.settings.appearance();
+                        if tabs(
+                            ui,
+                            "appearance",
+                            &mut appearance,
+                            &[
+                                (Appearance::Light, "Light"),
+                                (Appearance::Dark, "Dark"),
+                                (Appearance::System, "System"),
+                            ],
+                        ) {
+                            self.settings.appearance = Some(appearance);
                         }
-                    }
-                });
-            });
-            let before = self.settings.ui_scale;
-            row(
-                ui,
-                "Interface size",
-                "Scales text and controls.",
-                330.0,
-                |ui| {
-                    if Button::new("Reset")
-                        .variant(Variant::Ghost)
-                        .size(Size::Sm)
-                        .show(ui)
-                        .clicked()
-                    {
-                        self.settings.ui_scale = DEFAULT_UI_SCALE;
-                    }
-                    let (value, _) = ui.allocate_exact_size(Vec2::new(44.0, 20.0), Sense::hover());
+                    },
+                );
+                row(
+                    ui,
+                    "Tray icon",
+                    "The colour of the icon beside the clock. Monochrome is white on a dark taskbar and gray on a light one.",
+                    300.0,
+                    |ui| {
+                        let mut style = self.settings.tray_icon;
+                        if tabs(
+                            ui,
+                            "tray-icon",
+                            &mut style,
+                            &[
+                                (TrayIconStyle::Default, "Default"),
+                                (TrayIconStyle::Accent, "Accent"),
+                                (TrayIconStyle::Monochrome, "Monochrome"),
+                            ],
+                        ) {
+                            self.settings.tray_icon = style;
+                        }
+                    },
+                );
+                block(ui, |ui| {
+                    let (label, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
                     text::paint(
                         ui.painter(),
-                        value,
-                        Align2::RIGHT_CENTER,
-                        &format!("{:.0}%", self.settings.ui_scale * 100.0),
+                        label,
+                        Align2::LEFT_CENTER,
+                        "Accent colour",
                         text::medium(14.0),
                         t.foreground,
                     );
-                    controls::slider(
+                    note(
                         ui,
-                        &mut self.settings.ui_scale,
-                        0.8..=1.1,
-                        0.05,
-                        190.0,
-                        "Interface size",
+                        "Used for primary buttons, focus rings and the download series.",
                     );
-                },
-            );
-            if before != self.settings.ui_scale {
-                ui.ctx().set_zoom_factor(self.settings.ui_scale);
-            }
-            row(
-                ui,
-                "Live speed units",
-                "Usage totals and CSV exports always use bytes.",
-                200.0,
-                |ui| {
-                    let mut bits = self.settings.bits;
-                    if tabs(
-                        ui,
-                        "speed-units",
-                        &mut bits,
-                        &[(false, "Bytes/s"), (true, "Bits/s")],
-                    ) {
-                        self.settings.bits = bits;
-                    }
-                },
-            );
-        });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        let scheme = self.settings.scheme(ui.ctx());
+                        for base in BaseColor::ALL {
+                            if swatch(ui, &t, base, scheme, self.settings.base_color == base)
+                                .clicked()
+                            {
+                                self.settings.base_color = base;
+                            }
+                        }
+                    });
+                });
+                let before = self.settings.ui_scale;
+                row(
+                    ui,
+                    "Interface size",
+                    "Scales text and controls.",
+                    330.0,
+                    |ui| {
+                        if Button::new("Reset")
+                            .variant(Variant::Ghost)
+                            .size(Size::Sm)
+                            .show(ui)
+                            .clicked()
+                        {
+                            self.settings.ui_scale = DEFAULT_UI_SCALE;
+                        }
+                        let (value, _) =
+                            ui.allocate_exact_size(Vec2::new(44.0, 20.0), Sense::hover());
+                        text::paint(
+                            ui.painter(),
+                            value,
+                            Align2::RIGHT_CENTER,
+                            &format!("{:.0}%", self.settings.ui_scale * 100.0),
+                            text::medium(14.0),
+                            t.foreground,
+                        );
+                        controls::slider(
+                            ui,
+                            &mut self.settings.ui_scale,
+                            0.8..=1.1,
+                            0.05,
+                            190.0,
+                            "Interface size",
+                        );
+                    },
+                );
+                if before != self.settings.ui_scale {
+                    ui.ctx().set_zoom_factor(self.settings.ui_scale);
+                }
+                row(
+                    ui,
+                    "Live speed units",
+                    "Usage totals and CSV exports always use bytes.",
+                    200.0,
+                    |ui| {
+                        let mut bits = self.settings.bits;
+                        if tabs(
+                            ui,
+                            "speed-units",
+                            &mut bits,
+                            &[(false, "Bytes/s"), (true, "Bits/s")],
+                        ) {
+                            self.settings.bits = bits;
+                        }
+                    },
+                );
+            },
+        );
     }
 
     fn background_section(&mut self, ui: &mut egui::Ui) {
         section(
             ui,
+            Icon::Minimize,
             "Background monitoring",
             "Keep recording when the window is closed.",
             |ui| {
@@ -511,6 +527,7 @@ impl MonitorApp {
         let t = tk(ui.ctx());
         section(
             ui,
+            Icon::Activity,
             "Monitoring",
             "Built-in Windows capture of app traffic.",
             |ui| {
@@ -596,6 +613,7 @@ impl MonitorApp {
     fn countries_section(&mut self, ui: &mut egui::Ui) {
         section(
             ui,
+            Icon::Globe,
             "IP countries",
             "Optional offline country lookup.",
             |ui| {
@@ -641,6 +659,7 @@ impl MonitorApp {
         let t = tk(ui.ctx());
         section(
             ui,
+            Icon::Bell,
             "Alerts",
             "Windows notifications for unusual or heavy use.",
             |ui| {
@@ -748,16 +767,15 @@ impl MonitorApp {
         let data_dir = self.data_dir.clone();
         let program = std::env::current_exe().ok();
         let mut open = self.settings.storage_open;
+        // Open, the first row says how much is used; closed, the header does.
         let summary = if open {
-            format!(
-                "{} used \u{b7} where the app keeps its files",
-                format_bytes(usage.total() as f64)
-            )
+            String::new()
         } else {
             format!("{} used", format_bytes(usage.total() as f64))
         };
         collapsible_section(
             ui,
+            Icon::Database,
             "storage-section",
             "Storage",
             &summary,
@@ -919,6 +937,7 @@ impl MonitorApp {
     fn history_section(&mut self, ui: &mut egui::Ui) {
         section(
             ui,
+            Icon::Clock,
             "History and exports",
             "Usage totals are kept until you delete them. Old detail is merged under Storage.",
             |ui| {
@@ -944,6 +963,7 @@ impl MonitorApp {
     fn about_section(&mut self, ui: &mut egui::Ui) {
         section(
             ui,
+            Icon::Info,
             "About",
             concat!(
                 "OpenNetworkMonitor ",

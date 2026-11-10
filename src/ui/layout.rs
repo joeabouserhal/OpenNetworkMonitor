@@ -57,6 +57,17 @@ pub fn card_fixed<R>(ui: &mut Ui, padding: i8, height: f32, add: impl FnOnce(&mu
 
 /// A card title with an optional description beneath and actions on the right.
 pub fn card_header(ui: &mut Ui, title: &str, description: &str, actions: impl FnOnce(&mut Ui)) {
+    card_header_with_icon(ui, None, title, description, actions);
+}
+
+/// `card_header` with an optional icon before the title, level with the title line.
+pub fn card_header_with_icon(
+    ui: &mut Ui,
+    lead: Option<Icon>,
+    title: &str,
+    description: &str,
+    actions: impl FnOnce(&mut Ui),
+) {
     let t = tk(ui.ctx());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
@@ -64,6 +75,14 @@ pub fn card_header(ui: &mut Ui, title: &str, description: &str, actions: impl Fn
         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
             actions(ui);
             ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                if let Some(lead) = lead {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    // As tall as the title and the description together (20 + 2 + 18), so the
+                    // icon sits level with the middle of both.
+                    let height = if description.is_empty() { 20.0 } else { 40.0 };
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(20.0, height), Sense::hover());
+                    icon::paint(ui.painter(), lead, rect.center(), 18.0, t.foreground);
+                }
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     let (rect, response) = ui.allocate_exact_size(
