@@ -604,6 +604,23 @@ impl MonitorApp {
         let interval = self.data.snapshot.interval.max(0.001);
         (down as f64 / interval, up as f64 / interval)
     }
+    /// What each app is moving right now, in bytes per second: (download, upload), counting
+    /// only what the filters let through.
+    fn live_app_rates(&self) -> std::collections::HashMap<String, (f64, f64)> {
+        let mut filter = self.settings.filter.clone();
+        filter.source = Source::Transport;
+        filter.search.clear();
+        let interval = self.data.snapshot.interval.max(0.001);
+        let mut rates = std::collections::HashMap::<String, (f64, f64)>::new();
+        for row in &self.data.snapshot.live_rows {
+            if filter.matches(row) {
+                let entry = rates.entry(row.app.clone()).or_default();
+                entry.0 += row.down as f64 / interval;
+                entry.1 += row.up as f64 / interval;
+            }
+        }
+        rates
+    }
     fn rate(&self, value: f64) -> String {
         crate::ui::chart::speed_label(value, self.settings.bits)
     }
@@ -616,16 +633,8 @@ impl MonitorApp {
             .cloned()
             .unwrap_or_else(|| app_name(path))
     }
-    fn app_totals(&mut self) -> Arc<Vec<AppTotal>> {
-        let key = (
-            self.data.revision,
-            self.data.history_generation,
-            self.filter_revision,
-            self.app_search.clone(),
-        );
-        if self.app_cache_key.as_ref() == Some(&key) {
-            return self.app_cache.clone();
-        }
+    /// Each app's (download, upload) bytes over the period on screen, from the saved history.
+    fn history_app_totals(&mut self) -> Arc<BTreeMap<String, (u64, u64)>> {
         let history_key = (self.data.history_generation, self.filter_revision);
         if self.history_totals.key != Some(history_key) {
             let mut by_app = BTreeMap::<String, (u64, u64)>::new();
@@ -639,8 +648,21 @@ impl MonitorApp {
                 by_app: Arc::new(by_app),
             };
         }
+        self.history_totals.by_app.clone()
+    }
+    fn app_totals(&mut self) -> Arc<Vec<AppTotal>> {
+        let key = (
+            self.data.revision,
+            self.data.history_generation,
+            self.filter_revision,
+            self.app_search.clone(),
+        );
+        if self.app_cache_key.as_ref() == Some(&key) {
+            return self.app_cache.clone();
+        }
+        let by_app = self.history_app_totals();
         let mut totals = BTreeMap::<String, AppTotal>::new();
-        for (app, (down, up)) in self.history_totals.by_app.iter() {
+        for (app, (down, up)) in by_app.iter() {
             totals.insert(
                 app.clone(),
                 AppTotal {

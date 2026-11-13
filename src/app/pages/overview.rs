@@ -12,9 +12,23 @@ use std::collections::HashMap;
 const STAT_HEIGHT: f32 = 92.0;
 /// Height of the row holding top apps and destinations. The speed chart takes whatever
 /// the window leaves above it.
-/// A row of the app list: path, name, text for the right edge and, for the top list, the
-/// download and upload shares of the busiest app.
-type AppRow = (String, String, String, Option<(f32, f32)>);
+/// Download and upload figures at the right of an app row. `now` marks live speeds.
+struct Pair {
+    down: String,
+    up: String,
+    now: bool,
+}
+/// A row of the app list: the app, the figures at its right edge, for the top list the download
+/// and upload shares of the busiest app, a muted note after the name, and, when the app is moving
+/// data right now, its speeds in a small chip after the name.
+struct AppLine {
+    path: String,
+    name: String,
+    pairs: Vec<Pair>,
+    moving: Option<(String, String)>,
+    share: Option<(f32, f32)>,
+    note: String,
+}
 const BOTTOM_HEIGHT: f32 = 228.0;
 const GAP: f32 = 12.0;
 
@@ -207,8 +221,21 @@ impl MonitorApp {
                 self.top_apps_view = view;
             }
             ui.add_space(6.0);
-            // Rows: name, what to show at the right, and an optional (download, upload) share of the busiest.
-            let rows: Vec<AppRow> = match view {
+            let rates = self.live_app_rates();
+            let speeds = |path: &str| {
+                let (down, up) = rates.get(path).copied().unwrap_or((0.0, 0.0));
+                Pair {
+                    down: self.rate(down),
+                    up: self.rate(up),
+                    now: true,
+                }
+            };
+            // The speeds of an app that is moving data, for the chip after its name.
+            let moving = |path: &str| {
+                let (down, up) = rates.get(path).copied()?;
+                (down >= 1.0 || up >= 1.0).then(|| (self.rate(down), self.rate(up)))
+            };
+            let rows: Vec<AppLine> = match view {
                 TopAppsView::Top => {
                     let peak = self
                         .data
@@ -220,33 +247,58 @@ impl MonitorApp {
                     self.data
                         .top_apps
                         .iter()
-                        .map(|app| {
-                            (
-                                app.app.clone(),
-                                self.label(&app.app),
-                                // Down and up usage, split at the tab when painted.
-                                format!(
-                                    "{}\t{}",
-                                    format_bytes(app.down as f64),
-                                    format_bytes(app.up as f64)
-                                ),
-                                Some(if peak == 0 {
-                                    (0.0, 0.0)
-                                } else {
-                                    (
-                                        (app.down as f64 / peak as f64) as f32,
-                                        (app.up as f64 / peak as f64) as f32,
-                                    )
-                                }),
-                            )
+                        .map(|app| AppLine {
+                            path: app.app.clone(),
+                            name: self.label(&app.app),
+                            // What it used over the period; the chip says what it moves now.
+                            pairs: vec![Pair {
+                                down: format_bytes(app.down as f64),
+                                up: format_bytes(app.up as f64),
+                                now: false,
+                            }],
+                            moving: moving(&app.app),
+                            share: Some(if peak == 0 {
+                                (0.0, 0.0)
+                            } else {
+                                (
+                                    (app.down as f64 / peak as f64) as f32,
+                                    (app.up as f64 / peak as f64) as f32,
+                                )
+                            }),
+                            note: String::new(),
                         })
                         .collect()
                 }
                 TopAppsView::Recent => {
                     let now = chrono::Utc::now().timestamp();
-                    self.recently_used(now)
+                    // What each is moving right now, busiest first; apps that are quiet keep the
+                    // order of when they last ran. How long ago that was is a note after the
+                    // name, left out for the last two minutes.
+                    let mut recent = self.recently_used(now);
+                    let busy = |path: &str| rates.get(path).map_or(0.0, |(down, up)| down + up);
+                    recent.sort_by(|a, b| {
+                        busy(&b.0)
+                            .total_cmp(&busy(&a.0))
+                            .then(b.1.cmp(&a.1))
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+                    recent
                         .into_iter()
-                        .map(|(path, last)| (path.clone(), self.label(&path), ago(now, last), None))
+                        .map(|(path, last)| {
+                            let when = ago(now, last);
+                            AppLine {
+                                name: self.label(&path),
+                                pairs: vec![speeds(&path)],
+                                moving: None,
+                                share: None,
+                                note: if when == JUST_NOW {
+                                    String::new()
+                                } else {
+                                    when
+                                },
+                                path,
+                            }
+                        })
                         .collect()
                 }
             };
@@ -255,7 +307,15 @@ impl MonitorApp {
                 .auto_shrink([false, false])
                 .max_height(ui.available_height())
                 .show(ui, |ui| {
-                    for (path, name, value, share) in &rows {
+                    for line_data in &rows {
+                        let AppLine {
+                            path,
+                            name,
+                            pairs,
+                            moving,
+                            share,
+                            note,
+                        } = line_data;
                         let texture = self.icons.texture(ui.ctx(), path);
                         let height = 30.0;
                         let (row, response) = ui.allocate_exact_size(
@@ -263,14 +323,23 @@ impl MonitorApp {
                             Sense::hover(),
                         );
                         response.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Label,
-                                true,
-                                match value.split_once('\t') {
-                                    Some((down, up)) => format!("{name}: {down} down, {up} up"),
-                                    None => format!("{name}: {value}"),
-                                },
-                            )
+                            let mut label = name.clone();
+                            if !note.is_empty() {
+                                label = format!("{label}, {note}");
+                            }
+                            for (i, pair) in pairs.iter().enumerate() {
+                                label = format!(
+                                    "{label}{} {}{} down, {} up",
+                                    if i == 0 { ':' } else { ';' },
+                                    if pair.now { "now " } else { "" },
+                                    pair.down,
+                                    pair.up
+                                );
+                            }
+                            if let Some((down, up)) = moving {
+                                label = format!("{label}; now {down} down, {up} up");
+                            }
+                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label)
                         });
                         let painter = ui.painter();
                         let avatar_y = if share.is_some() {
@@ -288,9 +357,18 @@ impl MonitorApp {
                             name,
                             texture,
                         );
-                        let value_width = value
-                            .split('\t')
-                            .map(|part| text::text_width(painter, part, text::medium(13.5)) + 26.0)
+                        let font = text::medium(13.5);
+                        let value_width = pairs
+                            .iter()
+                            .map(|pair| {
+                                [&pair.down, &pair.up]
+                                    .into_iter()
+                                    .map(|part| {
+                                        text::text_width(painter, part, font.clone()) + 26.0
+                                    })
+                                    .sum::<f32>()
+                                    + 6.0
+                            })
                             .sum::<f32>();
                         let line = if share.is_some() { 20.0 } else { height };
                         text::paint(
@@ -304,14 +382,80 @@ impl MonitorApp {
                             text::medium(13.5),
                             t.foreground,
                         );
+                        if !note.is_empty() {
+                            let start = row.left()
+                                + 30.0
+                                + text::text_width(painter, name, text::medium(13.5))
+                                + 8.0;
+                            let end = row.right() - value_width - 12.0;
+                            if end > start + 20.0 {
+                                text::paint(
+                                    painter,
+                                    Rect::from_min_max(
+                                        Pos2::new(start, row.top()),
+                                        Pos2::new(end, row.top() + line),
+                                    ),
+                                    Align2::LEFT_CENTER,
+                                    note,
+                                    text::regular(12.5),
+                                    t.muted_foreground,
+                                );
+                            }
+                        }
+                        if let Some((down, up)) = moving {
+                            // What it moves right now, in a chip of its own so it reads apart
+                            // from the totals at the right.
+                            let font = text::regular(12.0);
+                            let gap = 8.0;
+                            let (down_w, up_w) = (
+                                text::text_width(painter, down, font.clone()),
+                                text::text_width(painter, up, font.clone()),
+                            );
+                            let width = 8.0 + 12.0 + 3.0 + down_w + 10.0 + 12.0 + 3.0 + up_w + 8.0;
+                            let start = row.left()
+                                + 30.0
+                                + text::text_width(painter, name, text::medium(13.5))
+                                + 10.0;
+                            if start + width + gap < row.right() - value_width {
+                                let chip = Rect::from_min_size(
+                                    Pos2::new(start, row.top() + line / 2.0 - 9.0),
+                                    Vec2::new(width, 18.0),
+                                );
+                                painter.rect_filled(chip, CornerRadius::same(9), t.muted);
+                                let mut x = chip.left() + 8.0;
+                                for (icon, tone, amount, amount_w) in [
+                                    (Icon::ArrowDown, t.chart_down, down, down_w),
+                                    (Icon::ArrowUp, t.chart_up, up, up_w),
+                                ] {
+                                    icon::paint(
+                                        painter,
+                                        icon,
+                                        Pos2::new(x + 5.0, chip.center().y),
+                                        11.0,
+                                        tone,
+                                    );
+                                    text::paint(
+                                        painter,
+                                        Rect::from_min_max(
+                                            Pos2::new(x + 15.0, chip.top()),
+                                            Pos2::new(x + 15.0 + amount_w, chip.bottom()),
+                                        ),
+                                        Align2::LEFT_CENTER,
+                                        amount,
+                                        font.clone(),
+                                        t.muted_foreground,
+                                    );
+                                    x += 15.0 + amount_w + 10.0;
+                                }
+                            }
+                        }
                         let value_rect =
                             Rect::from_min_max(row.min, Pos2::new(row.right(), row.top() + line));
-                        if let Some((down, up)) = value.split_once('\t') {
-                            let font = text::medium(13.5);
-                            let mut right = row.right();
+                        let mut right = row.right();
+                        for pair in pairs {
                             for (icon, tone, amount) in [
-                                (Icon::ArrowUp, t.chart_up, up),
-                                (Icon::ArrowDown, t.chart_down, down),
+                                (Icon::ArrowUp, t.chart_up, &pair.up),
+                                (Icon::ArrowDown, t.chart_down, &pair.down),
                             ] {
                                 let width = text::text_width(painter, amount, font.clone());
                                 text::paint(
@@ -334,15 +478,7 @@ impl MonitorApp {
                                 );
                                 right -= width + 26.0;
                             }
-                        } else {
-                            text::paint(
-                                painter,
-                                value_rect,
-                                Align2::RIGHT_CENTER,
-                                value,
-                                text::regular(13.0),
-                                t.muted_foreground,
-                            );
+                            right -= 6.0;
                         }
                         if let Some(share) = share {
                             let bar = Rect::from_min_max(
@@ -655,11 +791,13 @@ fn legend_toggle(ui: &mut egui::Ui, label: &str, color: Color32, on: &mut bool) 
     response.on_hover_cursor(egui::CursorIcon::PointingHand);
 }
 
+const JUST_NOW: &str = "Just now";
+
 /// How long ago an app last used the network, in words.
 pub(super) fn ago(now: i64, last: i64) -> String {
     let seconds = (now - last).max(0);
     match seconds {
-        0..120 => "Just now".to_owned(),
+        0..120 => JUST_NOW.to_owned(),
         120..3600 => format!("{} min ago", seconds / 60),
         3600..86_400 => format!("{} h ago", seconds / 3600),
         86_400..604_800 => format!("{} d ago", seconds / 86_400),

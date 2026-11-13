@@ -38,6 +38,8 @@ struct RowSpec<'a> {
     selectable: bool,
     /// This row's total as a share of the largest row, for the bar under it.
     share: f32,
+    /// What it is moving right now, as (download, upload) speeds. Shown in place of the subtitle.
+    live: Option<(String, String)>,
 }
 
 fn paint_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> egui::Response {
@@ -54,29 +56,24 @@ fn paint_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> egui::Response {
         },
     );
     response.widget_info(|| {
+        let mut label = format!(
+            "{}: {} down, {} up",
+            spec.title,
+            format_bytes(spec.down as f64),
+            format_bytes(spec.up as f64)
+        );
+        if let Some((down, up)) = &spec.live {
+            label = format!("{label}; now {down} down, {up} up");
+        }
         if spec.selectable {
             egui::WidgetInfo::selected(
                 egui::WidgetType::SelectableLabel,
                 true,
                 spec.selected,
-                format!(
-                    "{}: {} down, {} up",
-                    spec.title,
-                    format_bytes(spec.down as f64),
-                    format_bytes(spec.up as f64)
-                ),
+                label,
             )
         } else {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Label,
-                true,
-                format!(
-                    "{}: {} down, {} up",
-                    spec.title,
-                    format_bytes(spec.down as f64),
-                    format_bytes(spec.up as f64)
-                ),
-            )
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label)
         }
     });
     row_hover(ui, rect, &response, spec.selected);
@@ -99,7 +96,7 @@ fn paint_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> egui::Response {
             Pos2::new(columns[0].right(), rect.top() + bottom),
         )
     };
-    if spec.subtitle.is_empty() {
+    if spec.subtitle.is_empty() && spec.live.is_none() {
         text::paint(
             painter,
             text_area(0.0, ROW_HEIGHT - 8.0),
@@ -117,14 +114,46 @@ fn paint_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> egui::Response {
             text::medium(14.0),
             t.foreground,
         );
-        text::paint(
-            painter,
-            text_area(26.0, 42.0),
-            Align2::LEFT_CENTER,
-            spec.subtitle,
-            text::regular(12.0),
-            t.muted_foreground,
-        );
+        let sub = text_area(26.0, 42.0);
+        if let Some((down, up)) = &spec.live {
+            // Speeds right now, with the arrows the rest of the app uses for each direction.
+            let font = text::regular(12.0);
+            let mut x = sub.left();
+            for (icon, tone, amount) in [
+                (Icon::ArrowDown, t.chart_down, down),
+                (Icon::ArrowUp, t.chart_up, up),
+            ] {
+                let width = text::text_width(painter, amount, font.clone());
+                if x + 14.0 + width > sub.right() {
+                    break;
+                }
+                icon::paint(
+                    painter,
+                    icon,
+                    Pos2::new(x + 5.0, sub.center().y),
+                    11.0,
+                    tone,
+                );
+                text::paint(
+                    painter,
+                    Rect::from_min_max(Pos2::new(x + 14.0, sub.top()), sub.right_bottom()),
+                    Align2::LEFT_CENTER,
+                    amount,
+                    font.clone(),
+                    t.muted_foreground,
+                );
+                x += 14.0 + width + 12.0;
+            }
+        } else {
+            text::paint(
+                painter,
+                sub,
+                Align2::LEFT_CENTER,
+                spec.subtitle,
+                text::regular(12.0),
+                t.muted_foreground,
+            );
+        }
     }
     let (down, up) = (format_bytes(spec.down as f64), format_bytes(spec.up as f64));
     let cell = columns[1];
@@ -279,11 +308,15 @@ impl MonitorApp {
         };
         // Always three columns side by side, whatever the window or interface size.
         {
-            let third = ((width - gap * 2.0) / 3.0).floor();
+            // The apps table is a little wider: its rows also carry the speeds right now.
+            let room = width - gap * 2.0;
+            let first = (room * 0.40).floor();
+            let second = (room * 0.33).floor();
+            let third = room - first - second;
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                cell(ui, third, |ui| self.apps_table(ui, tables, &totals));
-                cell(ui, third, |ui| {
+                cell(ui, first, |ui| self.apps_table(ui, tables, &totals));
+                cell(ui, second, |ui| {
                     let (description, rows) = if lifetime {
                         ("All-time totals per host", &lifetime_rows)
                     } else {
@@ -373,21 +406,13 @@ impl MonitorApp {
                                     selected: is_selected,
                                     selectable: true,
                                     share: share_of(total.down.saturating_add(total.up), top),
+                                    live: Some((
+                                        self.rate(total.live_down as f64 / interval),
+                                        self.rate(total.live_up as f64 / interval),
+                                    )),
                                 },
                             )
-                            .on_hover_text(format!(
-                                "{}\n{}\nDownload now: {}\nUpload now: {}",
-                                total.name,
-                                total.path,
-                                crate::ui::chart::speed_label(
-                                    total.live_down as f64 / interval,
-                                    self.settings.bits
-                                ),
-                                crate::ui::chart::speed_label(
-                                    total.live_up as f64 / interval,
-                                    self.settings.bits
-                                )
-                            ));
+                            .on_hover_text(format!("{}\n{}", total.name, total.path));
                             if response.clicked() {
                                 chosen = Some(if is_selected {
                                     None
@@ -485,6 +510,7 @@ impl MonitorApp {
                                 selected: false,
                                 selectable: false,
                                 share: share_of(row.down.saturating_add(row.up), top),
+                                live: None,
                             },
                         )
                         .on_hover_text(help);

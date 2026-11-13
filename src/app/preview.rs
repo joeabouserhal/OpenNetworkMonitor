@@ -291,7 +291,8 @@ impl MonitorApp {
                 name: "Office Wi-Fi".into(),
             },
         ];
-        Arc::make_mut(&mut self.data.snapshot).live_rows = rows
+        // Live speeds, from both capture sources as the collector reports them.
+        let live: Vec<UsageRow> = rows
             .iter()
             .cloned()
             .map(|r| UsageRow {
@@ -299,6 +300,19 @@ impl MonitorApp {
                 up: r.up / 50,
                 ..r
             })
+            .collect();
+        let other_source = if self.settings.filter.source == Source::Transport {
+            Source::Adapter
+        } else {
+            Source::Transport
+        };
+        Arc::make_mut(&mut self.data.snapshot).live_rows = live
+            .iter()
+            .cloned()
+            .chain(live.iter().map(|r| UsageRow {
+                source: other_source.key().into(),
+                ..r.clone()
+            }))
             .collect();
         Arc::make_mut(&mut self.data.snapshot).interval = 1.0;
         Arc::make_mut(&mut self.data.snapshot).etw_active = true;

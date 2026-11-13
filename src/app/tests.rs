@@ -770,3 +770,28 @@ fn a_saved_window_takes_the_default_size_once_in_the_points_of_the_interface_siz
     assert!(default_window_size(Vec2::new(850.0, 560.0), 0.85).is_some());
     assert_eq!(default_window_size(target, 0.85), None);
 }
+
+#[test]
+fn recently_used_apps_show_their_speed_and_not_just_now() {
+    let size = Vec2::new(1440.0, 820.0);
+    let ctx = egui::Context::default();
+    let mut app = MonitorApp::preview(&ctx, "overview", false);
+    app.top_apps_view = TopAppsView::Recent;
+    let shown = texts(&settle(&mut app, &ctx, size));
+    assert!(
+        shown.iter().any(|(t, _)| t.ends_with("/s") && t != "0 B/s"),
+        "a speed is shown: {shown:?}"
+    );
+    assert!(!shown.iter().any(|(t, _)| t == "Just now"));
+    // Busiest first.
+    let position = |speed: &str| shown.iter().position(|(t, _)| t == speed);
+    assert!(position("15.68 MiB/s") < position("14.07 MiB/s"));
+    assert!(position("14.07 MiB/s") < position("12.58 MiB/s"));
+    // The Top apps tab shows speeds as well as totals.
+    app.top_apps_view = TopAppsView::Top;
+    let top = texts(&settle(&mut app, &ctx, size));
+    assert!(
+        top.iter().any(|(t, _)| t.ends_with("/s")),
+        "speeds in Top apps: {top:?}"
+    );
+}
