@@ -1,6 +1,6 @@
 [package]
 name = "open-network-monitor"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Local-first Windows network usage monitor built with Rust and egui"
